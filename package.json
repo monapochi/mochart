@@ -1,0 +1,21 @@
+{
+  "name": "mochart",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --format esm --sourcemap",
+    "build:types": "tsc -p tsconfig.json --emitDeclarationOnly --outDir dist",
+    "dev": "bun --hot index.html"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

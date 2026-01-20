@@ -38,20 +38,22 @@
     
     <input type="range" value="0">
     
-    <script src="wglchart.js"></script>
-    <script>
-      (function(){
-        window.addEventListener( 'load', function() {
-          var canvas = document.querySelector('div.chart .glcanvas');
-          chart = new WebGLChart(canvas);
+    <script type="module">
+      import { MoChart } from './src/index.ts';
 
-          var inp = document.querySelector('input');
-          inp.addEventListener('input', function(e) {
-            // console.log(e);
-            chart.x = this.value * -10;
-          });
-        });
-      })()
+      window.addEventListener('load', () => {
+        const canvas = document.querySelector('div.chart .glcanvas');
+        if (!canvas) return;
+
+        const data = [
+          { time: 1, open: 10, high: 12, low: 9, close: 11, volume: 1200 },
+          { time: 2, open: 11, high: 13, low: 10, close: 10, volume: 900 },
+          { time: 3, open: 10, high: 14, low: 8, close: 13, volume: 1500 },
+          { time: 4, open: 13, high: 15, low: 12, close: 14, volume: 1100 }
+        ];
+
+        new MoChart(canvas, { data });
+      });
     </script>
   </div>
 
