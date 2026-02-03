@@ -18,11 +18,12 @@ export const SMA: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'sma',
   name: 'SMA',
+  nameKey: 'indicator.sma.name',
   category: 'trend',
   pane: 'main',
   outputs: [{ name: 'sma', color: '#4ECDC4', style: 'line', lineWidth: 1, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.sma.param.period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -71,11 +72,12 @@ export const EMA: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'ema',
   name: 'EMA',
+  nameKey: 'indicator.ema.name',
   category: 'trend',
   pane: 'main',
   outputs: [{ name: 'ema', color: '#FFB703', style: 'line', lineWidth: 1, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.ema.param.period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -124,6 +126,7 @@ export const EMA: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
 export const BollingerBands: IndicatorDefinition<{ period: number; stdDev: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'bb',
+  nameKey: 'indicator.bb.name',
   name: 'Bollinger Bands',
   category: 'volatility',
   pane: 'main',
@@ -134,8 +137,8 @@ export const BollingerBands: IndicatorDefinition<{ period: number; stdDev: numbe
     { name: 'fill', color: 'rgba(33,150,243,0.1)', style: 'band', fillTo: 'lower', zLayer: 10 },
   ],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
+    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.bb.param.period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.bb.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -203,6 +206,7 @@ export const BollingerBands: IndicatorDefinition<{ period: number; stdDev: numbe
 export const Volume: IndicatorDefinition<{ maPeriod: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'volume',
+  nameKey: 'indicator.volume.name',
   name: 'Volume',
   category: 'volume',
   pane: 'sub1',
@@ -211,7 +215,7 @@ export const Volume: IndicatorDefinition<{ maPeriod: number }, OhlcvPoint> = {
     { name: 'volumeMA', color: '#1565C0', style: 'line', lineWidth: 1, zLayer: 30 },
   ],
   params: {
-    maPeriod: { type: 'number', default: 20, label: 'MA Period', min: 5, max: 50 },
+    maPeriod: { type: 'number', default: 20, label: 'MA Period', labelKey: 'indicator.volume.param.maPeriod', min: 5, max: 50 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ maPeriod }) => maPeriod - 1,
@@ -237,6 +241,7 @@ export const Volume: IndicatorDefinition<{ maPeriod: number }, OhlcvPoint> = {
 
 export const PivotPoints: IndicatorDefinition<{}, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
+  nameKey: 'indicator.pivot_points.name',
   id: 'pivot_points',
   name: 'Pivot Points',
   category: 'trend',

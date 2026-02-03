@@ -18,6 +18,7 @@ export const OBV: IndicatorDefinition<{}, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'obv',
   name: 'OBV',
+  nameKey: 'indicator.obv.name',
   category: 'volume',
   pane: 'sub1',
   outputs: [{ name: 'obv', color: '#3F51B5', style: 'line', lineWidth: 1.2, zLayer: 30 }],
@@ -51,11 +52,12 @@ export const CMF: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'cmf',
   name: 'CMF',
+  nameKey: 'indicator.cmf.name',
   category: 'volume',
   pane: 'sub1',
   outputs: [{ name: 'cmf', color: '#8BC34A', style: 'line', lineWidth: 1.2, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 21, label: 'Period', min: 2, max: 200 },
+    period: { type: 'number', default: 21, label: 'Period', labelKey: 'indicator.cmf.param.period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -97,12 +99,13 @@ export const CMF: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
 export const MFI: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'mfi',
+  nameKey: 'indicator.mfi.name',
   name: 'MFI',
   category: 'volume',
   pane: 'sub1',
   outputs: [{ name: 'mfi', color: '#FF7043', style: 'line', lineWidth: 1.2, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', min: 2, max: 200 },
+    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.mfi.param.period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period,
@@ -148,6 +151,7 @@ export const MFI: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
 export const KaufmanPatterns: IndicatorDefinition<{}, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'kaufman_patterns',
+  nameKey: 'indicator.kaufman_patterns.name',
   name: 'Kaufman Patterns',
   category: 'custom',
   pane: 'main',
@@ -162,15 +166,16 @@ export const KaufmanPatterns: IndicatorDefinition<{}, OhlcvPoint> = {
 
 export const SqueezeAlert: IndicatorDefinition<{ period: number; stdDev: number; threshold: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
+  nameKey: 'indicator.squeeze_alert.name',
   id: 'squeeze_alert',
   name: 'Squeeze Alert',
   category: 'volatility',
   pane: 'main',
   outputs: [{ name: 'squeeze', color: '#FF9800', style: 'marker', zLayer: 40 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
-    threshold: { type: 'number', default: 0.04, label: 'Threshold', min: 0.01, max: 0.2, step: 0.01 },
+    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.squeeze_alert.param.period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.squeeze_alert.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
+    threshold: { type: 'number', default: 0.04, label: 'Threshold', labelKey: 'indicator.squeeze_alert.param.threshold', min: 0.01, max: 0.2, step: 0.01 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -201,13 +206,14 @@ export const SqueezeAlert: IndicatorDefinition<{ period: number; stdDev: number;
 
 export const Divergence: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
+  nameKey: 'indicator.divergence.name',
   id: 'divergence',
   name: 'Divergence',
   category: 'custom',
   pane: 'main',
   outputs: [{ name: 'divergence', color: '#FFC107', style: 'marker', zLayer: 40 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', min: 2, max: 50 },
+    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.divergence.param.period', min: 2, max: 50 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period,

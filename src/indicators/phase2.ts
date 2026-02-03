@@ -18,11 +18,12 @@ export const RSI: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'rsi',
   name: 'RSI',
+  nameKey: 'indicator.rsi.name',
   category: 'momentum',
   pane: 'sub1',
   outputs: [{ name: 'rsi', color: '#9C27B0', style: 'line', lineWidth: 1.5, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', min: 2, max: 50 },
+    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.rsi.param.period', min: 2, max: 50 },
   },
   yRange: { min: 0, max: 100 },
   horizontalLines: [
@@ -107,11 +108,12 @@ export const ATR: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'atr',
   name: 'ATR',
+  nameKey: 'indicator.atr.name',
   category: 'volatility',
   pane: 'sub1',
   outputs: [{ name: 'atr', color: '#795548', style: 'line', lineWidth: 1.5, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', min: 5, max: 50 },
+    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.atr.param.period', min: 5, max: 50 },
   },
   complexity: { time: 'O(n)', space: 'O(1)' },
   warmupPeriod: ({ period }) => period,
@@ -183,6 +185,7 @@ export const MACD: IndicatorDefinition<
 > = {
   schemaVersion: SCHEMA_VERSION,
   id: 'macd',
+  nameKey: 'indicator.macd.name',
   name: 'MACD',
   category: 'momentum',
   pane: 'sub2',
@@ -193,9 +196,9 @@ export const MACD: IndicatorDefinition<
     { name: 'histogram', color: '#4CAF50', style: 'histogram', opacity: 0.7, zLayer: 20 },
   ],
   params: {
-    fastPeriod: { type: 'number', default: 12, label: 'Fast Period', min: 2, max: 50 },
-    slowPeriod: { type: 'number', default: 26, label: 'Slow Period', min: 5, max: 100 },
-    signalPeriod: { type: 'number', default: 9, label: 'Signal Period', min: 2, max: 50 },
+    fastPeriod: { type: 'number', default: 12, label: 'Fast Period', labelKey: 'indicator.macd.param.fastPeriod', min: 2, max: 50 },
+    slowPeriod: { type: 'number', default: 26, label: 'Slow Period', labelKey: 'indicator.macd.param.slowPeriod', min: 5, max: 100 },
+    signalPeriod: { type: 'number', default: 9, label: 'Signal Period', labelKey: 'indicator.macd.param.signalPeriod', min: 2, max: 50 },
   },
   horizontalLines: [{ value: 0, color: '#9E9E9E', dashed: false }],
   complexity: { time: 'O(n)', space: 'O(n)' },
@@ -272,6 +275,7 @@ export const MACD: IndicatorDefinition<
 export const ADX: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
   id: 'adx',
+  nameKey: 'indicator.adx.name',
   name: 'ADX',
   category: 'trend',
   pane: 'sub1',
@@ -281,7 +285,7 @@ export const ADX: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
     { name: 'minusDI', color: '#F44336', style: 'line', lineWidth: 1, zLayer: 30 },
   ],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', min: 5, max: 50 },
+    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.adx.param.period', min: 5, max: 50 },
   },
   yRange: { min: 0, max: 100 },
   horizontalLines: [
@@ -437,6 +441,7 @@ export const ADX: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
 
 export const TradeMarkers: IndicatorDefinition<{}, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
+  nameKey: 'indicator.trade_markers.name',
   id: 'trade_markers',
   name: 'Trade Markers',
   category: 'custom',
