@@ -1,3 +1,258 @@
+// Core chart class: data management, series API and wiring to renderer
+export interface ChartCoreOptions {
+  width?: number;
+  height?: number;
+  locale?: string;
+  theme?: 'light' | 'dark';
+}
+
+export interface SeriesOptions {
+  id?: string;
+  type?: 'candlestick' | 'line' | 'bar' | 'area';
+  color?: string;
+  name?: string;
+  // Rendering colors (optional)
+  outlineColor?: string; // frame and outline (color A)
+  wickColor?: string; // wick color (color A)
+  upColor?: string; // fill when close >= open (bull) (color B)
+  downColor?: string; // fill when close < open (bear) (color C)
+}
+
+import { CanvasRenderer } from '../renderer/canvas/canvasRenderer';
+
+// Minimal ChartCore skeleton to be expanded.
+export class ChartCore {
+  private container: HTMLElement;
+  private options: ChartCoreOptions;
+
+  // internal series store: id -> {options, data}
+  private seriesStore: Map<string, { options: SeriesOptions; data: any[] }> = new Map();
+  // viewport state (indices relative to series data)
+  private viewportStartIndex: number = 0;
+  private viewportVisibleCount: number = 200;
+
+  // simple event emitter
+  private listeners: Map<string, Set<(payload?: any) => void>> = new Map();
+
+  constructor(container: HTMLElement, options?: ChartCoreOptions) {
+    if (!container) throw new Error('Container element required');
+    this.container = container;
+    this.options = options ?? {};
+    // initialize canvas renderer: prefer an existing canvas inside container
+    try {
+      const canvas = (this.container.tagName.toLowerCase() === 'canvas')
+        ? (this.container as unknown as HTMLCanvasElement)
+        : (this.container.querySelector('canvas') as HTMLCanvasElement) ?? this.createCanvas();
+      (this as any)._renderer = new CanvasRenderer(canvas);
+    } catch (e) {
+      console.warn('CanvasRenderer init failed', e);
+    }
+  }
+
+  // Event emitter helpers
+  on(event: string, cb: (payload?: any) => void) {
+    const set = this.listeners.get(event) ?? new Set();
+    set.add(cb);
+    this.listeners.set(event, set);
+  }
+  off(event: string, cb?: (payload?: any) => void) {
+    if (!this.listeners.has(event)) return;
+    if (!cb) { this.listeners.delete(event); return; }
+    this.listeners.get(event)!.delete(cb);
+  }
+  private emit(event: string, payload?: any) {
+    const set = this.listeners.get(event);
+    if (!set) return;
+    for (const cb of Array.from(set)) cb(payload);
+  }
+
+  // Feed adapter contract: adapter should implement subscribe/unsubscribe or similar
+  async connectFeed(adapter: any): Promise<void> {
+    // basic wiring: adapter.subscribe(seriesId, callback)
+    if (!adapter) throw new Error('Adapter required');
+    if (typeof adapter.subscribe !== 'function') {
+      console.warn('Adapter does not implement subscribe/unsubscribe — storing adapter only');
+      // store adapter for future use
+      (this as any)._adapter = adapter;
+      return;
+    }
+    (this as any)._adapter = adapter;
+    // subscribe all series if adapter supports it
+    for (const seriesId of this.seriesStore.keys()) {
+      try {
+        adapter.subscribe(seriesId, (point: any) => this.pushRealtime(seriesId, point));
+      } catch (e) {
+        console.warn('subscribe failed for', seriesId, e);
+      }
+    }
+    this.emit('realtimeConnected');
+  }
+
+  async disconnectFeed(): Promise<void> {
+    const adapter = (this as any)._adapter;
+    if (adapter && typeof adapter.unsubscribe === 'function') {
+      for (const seriesId of this.seriesStore.keys()) {
+        try { adapter.unsubscribe(seriesId); } catch {};
+      }
+    }
+    delete (this as any)._adapter;
+    this.emit('realtimeDisconnected');
+  }
+
+  async addSeries(options: SeriesOptions): Promise<string> {
+    const id = options.id ?? `series_${Math.random().toString(36).slice(2,9)}`;
+    if (this.seriesStore.has(id)) throw new Error(`Series ${id} already exists`);
+    this.seriesStore.set(id, { options, data: [] });
+    this.emit('seriesAdded', { id, options });
+    return id;
+  }
+
+  async setSeriesData(seriesId: string, data: any[], partial = false): Promise<void> {
+    const entry = this.seriesStore.get(seriesId);
+    if (!entry) throw new Error(`Series ${seriesId} not found`);
+    if (partial) {
+      // merge partial at the end
+      entry.data.splice(entry.data.length - data.length, data.length, ...data);
+    } else {
+      entry.data = data.slice();
+    }
+    this.seriesStore.set(seriesId, entry);
+    // emit update
+    this.emit('seriesUpdated', { seriesId, length: entry.data.length });
+    // render immediately on canvas renderer if available
+    const renderer = (this as any)._renderer;
+    if (renderer && typeof renderer.drawSeries === 'function') {
+      try {
+        renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount }));
+      } catch (e) { console.warn(e); }
+    }
+  }
+
+  private getDataLength(): number {
+    let max = 0;
+    for (const v of this.seriesStore.values()) {
+      if (v.data && v.data.length > max) max = v.data.length;
+    }
+    return max;
+  }
+
+  private createCanvas(): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    const w = ((this.options.width ?? this.container.clientWidth) || 800) as number;
+    const h = ((this.options.height ?? this.container.clientHeight) || 600) as number;
+    c.style.width = w + 'px';
+    c.style.height = h + 'px';
+    this.container.appendChild(c);
+    return c;
+  }
+
+  async updateSeries(seriesId: string, patch: { index: number; point: any }[]): Promise<void> {
+    const entry = this.seriesStore.get(seriesId);
+    if (!entry) throw new Error(`Series ${seriesId} not found`);
+    for (const p of patch) {
+      if (p.index < 0 || p.index >= entry.data.length) continue;
+      entry.data[p.index] = p.point;
+    }
+    this.emit('seriesUpdated', { seriesId, patch });
+  }
+
+  async pushRealtime(seriesId: string, point: any): Promise<void> {
+    const entry = this.seriesStore.get(seriesId);
+    if (!entry) throw new Error(`Series ${seriesId} not found`);
+    const last = entry.data[entry.data.length - 1];
+    if (!last || last.time !== point.time) {
+      entry.data.push(point);
+    } else {
+      // replace last
+      entry.data[entry.data.length - 1] = point;
+    }
+    this.emit('realtime', { seriesId, point });
+    this.emit('seriesUpdated', { seriesId, realtime: true });
+  }
+
+  getVisibleRange(): { from: number; to: number } | null {
+    const len = this.getDataLength();
+    if (len === 0) return null;
+    const from = Math.max(0, Math.min(len - 1, this.viewportStartIndex));
+    const to = Math.max(0, Math.min(len - 1, this.viewportStartIndex + this.viewportVisibleCount - 1));
+    return { from, to };
+  }
+
+  setVisibleRange(from: number, to: number): void {
+    // programmatic pan/zoom by indices
+    const len = this.getDataLength();
+    if (len === 0) return;
+    const f = Math.max(0, Math.min(len - 1, from));
+    const t = Math.max(0, Math.min(len - 1, to));
+    this.viewportStartIndex = Math.min(f, t);
+    this.viewportVisibleCount = Math.max(1, t - f + 1);
+    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    // force redraw of all series
+    const renderer = (this as any)._renderer;
+    if (renderer && typeof renderer.drawSeries === 'function') {
+      for (const [seriesId, entry] of this.seriesStore.entries()) {
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+      }
+    }
+  }
+
+  setViewport(fromIndex: number, toIndex: number): void {
+    this.setVisibleRange(fromIndex, toIndex);
+  }
+
+  panBy(deltaIndex: number): void {
+    const len = this.getDataLength();
+    if (len === 0) return;
+    const maxStart = Math.max(0, len - this.viewportVisibleCount);
+    this.viewportStartIndex = Math.max(0, Math.min(maxStart, this.viewportStartIndex + deltaIndex));
+    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    const renderer = (this as any)._renderer;
+    if (renderer && typeof renderer.drawSeries === 'function') {
+      for (const [seriesId, entry] of this.seriesStore.entries()) {
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+      }
+    }
+  }
+
+  zoomAt(factor: number, centerIndex?: number): void {
+    const len = this.getDataLength();
+    if (len === 0) return;
+    const minVisible = 5;
+    let newCount = Math.max(minVisible, Math.min(len, Math.round(this.viewportVisibleCount * factor)));
+    // determine center
+    const center = typeof centerIndex === 'number' ? centerIndex : Math.min(len - 1, this.viewportStartIndex + Math.floor(this.viewportVisibleCount / 2));
+    const rel = (center - this.viewportStartIndex) / Math.max(1, this.viewportVisibleCount - 1);
+    let newStart = center - Math.round(rel * (newCount - 1));
+    newStart = Math.max(0, Math.min(len - newCount, newStart));
+    this.viewportStartIndex = newStart;
+    this.viewportVisibleCount = newCount;
+    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    const renderer = (this as any)._renderer;
+    if (renderer && typeof renderer.drawSeries === 'function') {
+      for (const [seriesId, entry] of this.seriesStore.entries()) {
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+      }
+    }
+  }
+
+  applyOptions(options: ChartCoreOptions): void {
+    Object.assign(this.options, options);
+    this.emit('optionsChanged', this.options);
+  }
+
+  resize(): void {
+    // handle container resize
+    this.emit('resize');
+  }
+
+  async destroy(): Promise<void> {
+    // cleanup
+    await this.disconnectFeed();
+    this.seriesStore.clear();
+    this.listeners.clear();
+  }
+}
+
 import type { ChartConfig, ChartOptions, IndicatorInstance, OhlcvPoint } from './types';
 import type { ChartRenderer } from '../renderer/renderer';
 import { WebGL2Renderer } from '../renderer/webgl2/webgl2Renderer';
