@@ -1,3 +1,12 @@
+export { createEmbedAPI } from './core/embedApi';
+export { ChartCore } from './core/chart';
+
+// Export embed API types
+export type { ChartEmbedAPI, EventHandler } from './core/embedApi';
+// Convenience default export
+export default {
+  createEmbedAPI: (await import('./core/embedApi')).createEmbedAPI
+};
 export { MoChart } from './core/chart';
 export type { ChartConfig, ChartOptions, OhlcvPoint, IndicatorInstance } from './core/types';
 export type {
