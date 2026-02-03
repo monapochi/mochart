@@ -1,3 +1,49 @@
+// WebGPU renderer interface skeleton. Concrete implementation to follow.
+export interface WebGPUBackend {
+  init(canvas: HTMLCanvasElement): Promise<void>;
+  drawSeries(seriesId: string, data: Float32Array): void;
+  updateBuffers(seriesId: string, data: Float32Array, offset?: number): void;
+  partialUpdateBuffers(seriesId: string, patches: Array<{offset:number; data:Float32Array}>): void;
+  resizeViewport(width: number, height: number): void;
+  destroy(): void;
+}
+
+export class WebGPUStub implements WebGPUBackend {
+  private device: GPUDevice | null = null;
+  private context: GPUCanvasContext | null = null;
+
+  async init(canvas: HTMLCanvasElement): Promise<void> {
+    // Try to initialize WebGPU; graceful fallback if unavailable
+    if (!('gpu' in navigator)) {
+      console.warn('WebGPU not supported in this environment');
+      return;
+    }
+    try {
+      const adapter = await (navigator as any).gpu.requestAdapter();
+      if (!adapter) { console.warn('No GPU adapter found'); return; }
+      const device = await adapter.requestDevice();
+      this.device = device;
+      this.context = (canvas.getContext('webgpu') as unknown) as GPUCanvasContext;
+      // Configure basic swapChain format if available
+      const format = navigator.userAgent.includes('Firefox') ? 'bgra8unorm' : 'rgba8unorm';
+      try { this.context.configure({ device, format }); } catch (e) { /* ignore if unsupported */ }
+      console.info('WebGPU initialized');
+    } catch (e) {
+      console.warn('WebGPU initialization failed', e);
+    }
+  }
+
+  drawSeries(_seriesId: string, _data: Float32Array): void { /* to be implemented */ }
+  updateBuffers(_seriesId: string, _data: Float32Array, _offset?: number): void { /* to be implemented */ }
+  partialUpdateBuffers(_seriesId: string, _patches: Array<{offset:number; data:Float32Array}>): void { /* to be implemented */ }
+  resizeViewport(_width: number, _height: number): void { /* to be implemented */ }
+  destroy(): void {
+    if (this.device) { /* device cleanup if needed */ }
+    this.device = null;
+    this.context = null;
+  }
+}
+
 import type { ChartConfig, ChartColors, OhlcvPoint } from '../../core/types';
 import type { ChartRenderer } from '../renderer';
 
@@ -22,8 +68,8 @@ type WebGPUContext = {
 };
 
 const DEFAULT_COLORS: ChartColors = {
-  up: [1.0, 0.0, 0.0, 1.0],
-  down: [0.0, 0.7, 0.0, 1.0],
+  up: [0.0, 0.7, 0.0, 1.0],
+  down: [1.0, 0.0, 0.0, 1.0],
   wick: [0.0, 0.0, 0.0, 1.0],
   outline: [0.0, 0.0, 0.0, 1.0],
   background: [1.0, 1.0, 1.0, 1.0],
@@ -433,19 +479,23 @@ export class WebGPURenderer implements ChartRenderer {
     const candleWidth = 2 / Math.max(1, count);
     const wickWidth = candleWidth * 0.2;
 
+    // compensate for non-square canvas: scale X coordinates so candles keep correct aspect
+    const canvas = this.canvas as HTMLCanvasElement;
+    const aspectCorrection = canvas && canvas.width && canvas.height ? canvas.height / canvas.width : 1;
+
     const vertices: number[] = [];
     const colorUp = this.colors.up;
     const colorDown = this.colors.down;
     const colorWick = this.colors.wick;
 
-    const toX = (i: number) => -1 + candleWidth * i + candleWidth * 0.5;
+    const toX = (i: number) => (-1 + candleWidth * i + candleWidth * 0.5) * aspectCorrection;
     const toY = (price: number) => ((price - minPrice) / range) * 2 - 1;
 
     for (let i = 0; i < count; i++) {
       const d = this.data[i];
       const x = toX(i);
-      const bodyHalf = candleWidth * 0.4;
-      const wickHalf = wickWidth * 0.5;
+      const bodyHalf = candleWidth * 0.4 * aspectCorrection;
+      const wickHalf = wickWidth * 0.5 * aspectCorrection;
       const openY = toY(d.open);
       const closeY = toY(d.close);
       const highY = toY(d.high);

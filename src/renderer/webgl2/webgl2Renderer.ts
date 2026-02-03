@@ -2,8 +2,8 @@ import type { ChartConfig, ChartColors, OhlcvPoint } from '../../core/types';
 import type { ChartRenderer } from '../renderer';
 
 const DEFAULT_COLORS: ChartColors = {
-  up: [1.0, 0.0, 0.0, 1.0],
-  down: [0.0, 0.7, 0.0, 1.0],
+  up: [0.0, 0.7, 0.0, 1.0],
+  down: [1.0, 0.0, 0.0, 1.0],
   wick: [0.0, 0.0, 0.0, 1.0],
   outline: [0.0, 0.0, 0.0, 1.0],
   background: [1.0, 1.0, 1.0, 1.0],
