@@ -13,7 +13,7 @@
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --format esm --sourcemap",
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly --outDir dist",
-    "dev": "bun --hot index.html"
+    "dev": "bun --hot ./index.html"
   },
   "devDependencies": {
     "typescript": "^5.6.3"
