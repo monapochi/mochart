@@ -57,7 +57,7 @@ export const CMF: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'sub1',
   outputs: [{ name: 'cmf', color: '#8BC34A', style: 'line', lineWidth: 1.2, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 21, label: 'Period', labelKey: 'indicator.cmf.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 21, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -105,7 +105,7 @@ export const MFI: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'sub1',
   outputs: [{ name: 'mfi', color: '#FF7043', style: 'line', lineWidth: 1.2, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.mfi.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 14, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period,
@@ -150,8 +150,8 @@ export const MFI: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
 
 export const KaufmanPatterns: IndicatorDefinition<{}, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
-  id: 'kaufman_patterns',
   nameKey: 'indicator.kaufman_patterns.name',
+  id: 'kaufman_patterns',
   name: 'Kaufman Patterns',
   category: 'custom',
   pane: 'main',
@@ -166,17 +166,27 @@ export const KaufmanPatterns: IndicatorDefinition<{}, OhlcvPoint> = {
 
 export const SqueezeAlert: IndicatorDefinition<{ period: number; stdDev: number; threshold: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
-  nameKey: 'indicator.squeeze_alert.name',
   id: 'squeeze_alert',
   name: 'Squeeze Alert',
+  nameKey: 'indicator.squeeze_alert.name',
   category: 'volatility',
   pane: 'main',
   outputs: [{ name: 'squeeze', color: '#FF9800', style: 'marker', zLayer: 40 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.squeeze_alert.param.period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.squeeze_alert.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
-    threshold: { type: 'number', default: 0.04, label: 'Threshold', labelKey: 'indicator.squeeze_alert.param.threshold', min: 0.01, max: 0.2, step: 0.01 },
+    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
+    threshold: { type: 'number', default: 0.04, label: 'Threshold', min: 0.01, max: 0.2, step: 0.01 },
   },
+  alerts: [
+    {
+      id: 'squeeze_found',
+      name: 'Squeeze Detected',
+      severity: 'warning',
+      cooldown: 60,
+      condition: (values) => values['squeeze'] !== null,
+      message: (values, bar: any) => `Squeeze detected at price ${bar.close}`,
+    },
+  ],
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
   calculate(data, { period, stdDev, threshold }) {
@@ -206,15 +216,25 @@ export const SqueezeAlert: IndicatorDefinition<{ period: number; stdDev: number;
 
 export const Divergence: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
-  nameKey: 'indicator.divergence.name',
   id: 'divergence',
   name: 'Divergence',
+  nameKey: 'indicator.divergence.name',
   category: 'custom',
   pane: 'main',
   outputs: [{ name: 'divergence', color: '#FFC107', style: 'marker', zLayer: 40 }],
   params: {
-    period: { type: 'number', default: 14, label: 'Period', labelKey: 'indicator.divergence.param.period', min: 2, max: 50 },
+    period: { type: 'number', default: 14, label: 'Period', min: 2, max: 50 },
   },
+  alerts: [
+    {
+      id: 'divergence_found',
+      name: 'Divergence Detected',
+      severity: 'warning',
+      cooldown: 60,
+      condition: (values) => values['divergence'] !== null,
+      message: (values, bar: any) => `Divergence detected at price ${bar.close}`,
+    },
+  ],
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period,
   calculate(data, { period }) {

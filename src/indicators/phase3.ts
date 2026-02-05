@@ -23,7 +23,7 @@ export const VWAP: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'main',
   outputs: [{ name: 'vwap', color: '#6D4C41', style: 'line', lineWidth: 1.5, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.vwap.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -103,7 +103,7 @@ export const VolRatio: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'sub1',
   outputs: [{ name: 'volRatio', color: '#00897B', style: 'line', lineWidth: 1.2, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.vol_ratio.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -162,8 +162,8 @@ export const PercentB: IndicatorDefinition<{ period: number; stdDev: number }, O
   pane: 'sub1',
   outputs: [{ name: 'percentB', color: '#673AB7', style: 'line', lineWidth: 1.3, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.percent_b.param.period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.percent_b.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
+    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -227,15 +227,15 @@ export const PercentB: IndicatorDefinition<{ period: number; stdDev: number }, O
 
 export const BBWidth: IndicatorDefinition<{ period: number; stdDev: number }, OhlcvPoint> = {
   schemaVersion: SCHEMA_VERSION,
-  nameKey: 'indicator.bb_width.name',
   id: 'bb_width',
+  nameKey: 'indicator.bb_width.name',
   name: 'BB Width',
   category: 'volatility',
   pane: 'sub1',
   outputs: [{ name: 'width', color: '#00BCD4', style: 'area', opacity: 0.5, fillTo: 0, zLayer: 20 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.bb_width.param.period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.bb_width.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
+    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,

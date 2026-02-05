@@ -23,7 +23,7 @@ export const SMA: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'main',
   outputs: [{ name: 'sma', color: '#4ECDC4', style: 'line', lineWidth: 1, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.sma.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -77,7 +77,7 @@ export const EMA: IndicatorDefinition<{ period: number }, OhlcvPoint> = {
   pane: 'main',
   outputs: [{ name: 'ema', color: '#FFB703', style: 'line', lineWidth: 1, zLayer: 30 }],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.ema.param.period', min: 2, max: 200 },
+    period: { type: 'number', default: 20, label: 'Period', min: 2, max: 200 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -137,8 +137,8 @@ export const BollingerBands: IndicatorDefinition<{ period: number; stdDev: numbe
     { name: 'fill', color: 'rgba(33,150,243,0.1)', style: 'band', fillTo: 'lower', zLayer: 10 },
   ],
   params: {
-    period: { type: 'number', default: 20, label: 'Period', labelKey: 'indicator.bb.param.period', min: 5, max: 100 },
-    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', labelKey: 'indicator.bb.param.stdDev', min: 0.5, max: 4.0, step: 0.1 },
+    period: { type: 'number', default: 20, label: 'Period', min: 5, max: 100 },
+    stdDev: { type: 'number', default: 2.0, label: 'Std Dev', min: 0.5, max: 4.0, step: 0.1 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ period }) => period - 1,
@@ -215,7 +215,7 @@ export const Volume: IndicatorDefinition<{ maPeriod: number }, OhlcvPoint> = {
     { name: 'volumeMA', color: '#1565C0', style: 'line', lineWidth: 1, zLayer: 30 },
   ],
   params: {
-    maPeriod: { type: 'number', default: 20, label: 'MA Period', labelKey: 'indicator.volume.param.maPeriod', min: 5, max: 50 },
+    maPeriod: { type: 'number', default: 20, label: 'MA Period', min: 5, max: 50 },
   },
   complexity: { time: 'O(n)', space: 'O(n)' },
   warmupPeriod: ({ maPeriod }) => maPeriod - 1,

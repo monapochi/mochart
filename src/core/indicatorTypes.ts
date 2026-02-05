@@ -34,7 +34,6 @@ export type IndicatorParamSchema<T> = {
     type: 'number' | 'string' | 'boolean' | 'select';
     default: T[K];
     label: string;
-    labelKey?: string;
     description?: string;
     min?: number;
     max?: number;
