@@ -3,8 +3,17 @@ import type { ChartCore, ChartCoreOptions } from './chart';
 
 export type EventHandler = (payload?: any) => void;
 
+export interface ChartEmbedOptions extends ChartCoreOptions {
+  enableTooltip?: boolean;
+  showLegend?: boolean;
+  enableCrosshair?: boolean;
+  attachEvents?: boolean;
+  symbol?: string;
+  tooltipFormatter?: (point: any, index: number) => string;
+}
+
 export interface ChartEmbedAPI {
-  create(container: HTMLElement, options?: ChartCoreOptions): Promise<ChartCore>;
+  create(container: HTMLElement, options?: ChartEmbedOptions): Promise<ChartCore>;
   connectFeed(adapter: any): Promise<void>;
   disconnectFeed(): Promise<void>;
   on(event: string, handler: EventHandler): void;
@@ -70,103 +79,123 @@ export function createEmbedAPI(): ChartEmbedAPI {
 
       const onPointerMove = (ev: PointerEvent) => {
         if (!this.core) return;
-        if (this.dragging) {
+        if (this.dragging && this.pointerId === ev.pointerId) {
           const seriesStore = (this.core as any).seriesStore as any;
           const primaryEntry = seriesStore ? Array.from(seriesStore.values())[0] as any : null;
           const primaryData = primaryEntry?.data ?? [];
-          const layout = renderer.getLayout ? renderer.getLayout(primaryData, this.opts) : null;
+          const vr = this.core!.getVisibleRange();
+          const dragOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
+            ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+            : this.opts;
+          const layout = renderer.getLayout ? renderer.getLayout(primaryData, dragOpts) : null;
           const stepX = layout ? layout.stepX : 10;
           const dx = ev.clientX - this.dragStartX;
           const deltaIndex = Math.round(-dx / stepX);
-          this.core!.panBy(deltaIndex + (this.dragStartIndex - (this.core!.getVisibleRange()?.from ?? 0)));
+          const targetIndex = this.dragStartIndex + deltaIndex;
+          const currentFrom = this.core!.getVisibleRange()?.from ?? 0;
+          if (targetIndex !== currentFrom) {
+            this.core!.panBy(targetIndex - currentFrom);
+          }
           return;
         }
-        // hover: show tooltip only when over a candle (not just anywhere on plot)
-        if (this.tooltipEl && this.opts.enableTooltip) {
+        // hover: crosshair and tooltip are independent
+        if (!this.dragging) {
           const rect = canvas.getBoundingClientRect();
           const mx = ev.clientX - rect.left;
           const my = ev.clientY - rect.top;
           const seriesStore = (this.core as any).seriesStore as any;
           const primaryEntry = seriesStore ? Array.from(seriesStore.values())[0] as any : null;
           const data = primaryEntry?.data ?? [];
-          const mapped = renderer.mapClientToData(mx, my, data, this.opts);
-          if (!mapped) { this.tooltipEl.style.display = 'none'; return; }
-          // determine candle hit by using layout and candle width
-          const layout = renderer.getLayout ? renderer.getLayout(data, this.opts) : null;
-          const candleW = layout ? layout.candleW : (layout ? layout.candleW : 10);
-          const dx = Math.abs(mx - mapped.x);
-          const horizHit = dx <= (candleW / 2 + 4); // horizontal tolerance in px
-          // vertical hit: compute candle Y positions from layout yMin/yMax
-          let vertHit = true;
-          if (layout && typeof layout.yMin === 'number' && typeof layout.yMax === 'number') {
-            const { plotY, plotH, yMin, yMax } = layout as any;
-            const priceToY = (p: number) => {
-              const t = (p - yMin) / (yMax - yMin || 1);
-              return plotY + (1 - t) * plotH;
-            };
-            const yOpen = priceToY(mapped.point.open);
-            const yClose = priceToY(mapped.point.close);
-            const yHigh = priceToY(mapped.point.high);
-            const yLow = priceToY(mapped.point.low);
-            const top = Math.min(yOpen, yClose, yHigh);
-            const bottom = Math.max(yOpen, yClose, yLow);
-            const vertTol = 6; // px tolerance
-            vertHit = (my >= top - vertTol && my <= bottom + vertTol);
-          }
-          if (!(horizHit && vertHit)) { this.tooltipEl.style.display = 'none'; return; }
-
-          // format tooltip with OHLCV each on its own line
-          const p = mapped.point;
-          const html = this.opts.tooltipFormatter ? this.opts.tooltipFormatter(p, mapped.index) : `<div style="font-weight:600">${new Date(mapped.time).toLocaleDateString()}</div><div>O ${p.open}</div><div>H ${p.high}</div><div>L ${p.low}</div><div>C ${p.close}</div><div>V ${p.volume.toLocaleString()}</div>`;
-          this.tooltipEl.innerHTML = html;
-
-          // position tooltip relative to the container (use client coordinates)
-          const containerRect = this.container!.getBoundingClientRect();
-          // temporarily make visible to measure
-          this.tooltipEl.style.display = 'block';
-          this.tooltipEl.style.left = '0px';
-          this.tooltipEl.style.top = '0px';
-          const tipRect = this.tooltipEl.getBoundingClientRect();
-          const tipW = tipRect.width;
-          const tipH = tipRect.height;
-          // client coords relative to container
-          const clientXRel = ev.clientX - containerRect.left;
-          const clientYRel = ev.clientY - containerRect.top;
-          // default place to right-bottom of cursor
-          let left = clientXRel + 12;
-          let top = clientYRel + 12;
-          // if cursor is in lower half of canvas, show above cursor
-          const canvasMidY = rect.height / 2;
-          if (ev.clientY - rect.top > canvasMidY) {
-            top = clientYRel - tipH - 12;
-          }
-          // avoid right overflow relative to container
-          if (left + tipW > containerRect.width - 6) left = Math.max(6, clientXRel - tipW - 12);
-          if (left < 6) left = 6;
-          if (top < 6) top = 6;
-          this.tooltipEl.style.left = left + 'px';
-          this.tooltipEl.style.top = top + 'px';
-
-          // draw crosshair: redraw base then overlay crosshair
+          
+          // Get current viewport and create opts with it
+          const vr = this.core!.getVisibleRange();
+          const viewportOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
+            ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+            : this.opts;
+          
+          const mapped = renderer.mapClientToData(mx, my, data, viewportOpts);
+          const layout = renderer.getLayout ? renderer.getLayout(data, viewportOpts) : null;
+          
+          // Check if cursor is in plot area
+          const inPlotArea = layout && mx >= layout.plotX && mx <= layout.plotX + layout.plotW
+            && my >= layout.plotY && my <= layout.plotY + layout.plotH;
+          
           const primarySeriesId = Array.from((this.core as any).seriesStore.keys())[0];
           const entry = (this.core as any).seriesStore.get(primarySeriesId) as any;
+          
+          // Always redraw series first
           if (renderer && typeof renderer.drawSeries === 'function') {
-            const vr = this.core!.getVisibleRange();
-            if (vr && typeof vr.from === 'number' && typeof vr.to === 'number') {
-              renderer.drawSeries(primarySeriesId, entry?.data ?? [], Object.assign({}, entry?.options ?? {}, { startIndex: vr.from, visibleCount: vr.to - vr.from + 1 }));
-            } else {
-              renderer.drawSeries(primarySeriesId, entry?.data ?? [], Object.assign({}, entry?.options ?? {}));
-            }
-            renderer.drawCrosshairAt(mx, my, entry?.data ?? [], this.opts);
+            renderer.drawSeries(primarySeriesId, entry?.data ?? [], Object.assign({}, entry?.options ?? {}, viewportOpts));
           }
-          // update legend with hovered point
-          if (this.legendEl) {
+          
+          // Crosshair: show when in plot area (independent of tooltip)
+          const enableCrosshair = this.opts.enableCrosshair !== false; // default true
+          if (enableCrosshair && inPlotArea && mapped && renderer) {
+            renderer.drawCrosshairAt(mx, my, entry?.data ?? [], viewportOpts);
+          }
+          
+          // Tooltip: completely independent, show when over candle
+          if (this.tooltipEl && this.opts.enableTooltip && inPlotArea && mapped) {
+            const candleW = layout ? layout.candleW : 10;
+            const dx = Math.abs(mx - mapped.x);
+            const horizHit = dx <= (candleW / 2 + 4);
+            let vertHit = true;
+            if (layout && typeof layout.yMin === 'number' && typeof layout.yMax === 'number') {
+              const { plotY, plotH, yMin, yMax } = layout as any;
+              const priceToY = (p: number) => {
+                const t = (p - yMin) / (yMax - yMin || 1);
+                return plotY + (1 - t) * plotH;
+              };
+              const yHigh = priceToY(mapped.point.high);
+              const yLow = priceToY(mapped.point.low);
+              const top = Math.min(yHigh, yLow);
+              const bottom = Math.max(yHigh, yLow);
+              const vertTol = 6;
+              vertHit = (my >= top - vertTol && my <= bottom + vertTol);
+            }
+            
+            if (horizHit && vertHit) {
+              const p = mapped.point;
+              const html = this.opts.tooltipFormatter ? this.opts.tooltipFormatter(p, mapped.index) : `<div style="font-weight:600">${new Date(mapped.time).toLocaleDateString()}</div><div>O ${p.open}</div><div>H ${p.high}</div><div>L ${p.low}</div><div>C ${p.close}</div><div>V ${p.volume.toLocaleString()}</div>`;
+              this.tooltipEl.innerHTML = html;
+              
+              const containerRect = this.container!.getBoundingClientRect();
+              this.tooltipEl.style.display = 'block';
+              this.tooltipEl.style.left = '0px';
+              this.tooltipEl.style.top = '0px';
+              const tipRect = this.tooltipEl.getBoundingClientRect();
+              const tipW = tipRect.width;
+              const tipH = tipRect.height;
+              const clientXRel = ev.clientX - containerRect.left;
+              const clientYRel = ev.clientY - containerRect.top;
+              let left = clientXRel + 12;
+              let top = clientYRel + 12;
+              const canvasMidY = rect.height / 2;
+              if (ev.clientY - rect.top > canvasMidY) {
+                top = clientYRel - tipH - 12;
+              }
+              if (left + tipW > containerRect.width - 6) left = Math.max(6, clientXRel - tipW - 12);
+              if (left < 6) left = 6;
+              if (top < 6) top = 6;
+              this.tooltipEl.style.left = left + 'px';
+              this.tooltipEl.style.top = top + 'px';
+            } else {
+              this.tooltipEl.style.display = 'none';
+            }
+          } else if (this.tooltipEl) {
+            this.tooltipEl.style.display = 'none';
+          }
+          
+          // Update legend with hovered candle info (independent)
+          if (this.legendEl && mapped) {
+            const p = mapped.point;
             this._updateLegend(`${this.opts.symbol ?? ''}`, `C ${p.close}` + ` (${new Date(mapped.time).toLocaleDateString()})`);
           }
         }
       };
 
       const onPointerUp = (ev: PointerEvent) => {
+        if (this.pointerId !== ev.pointerId) return;
         try { canvas.releasePointerCapture(ev.pointerId); } catch {};
         this.dragging = false; this.pointerId = null;
       };
@@ -177,7 +206,11 @@ export function createEmbedAPI(): ChartEmbedAPI {
         const rect = canvas.getBoundingClientRect();
         const cx = ev.clientX - rect.left;
         const mx = cx;
-        const mapped = renderer.mapClientToData(mx, rect.height / 2, this._getPrimarySeriesData(), this.opts);
+        const vr = this.core!.getVisibleRange();
+        const wheelOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
+          ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+          : this.opts;
+        const mapped = renderer.mapClientToData(mx, rect.height / 2, this._getPrimarySeriesData(), wheelOpts);
         const centerIndex = mapped ? mapped.index : undefined;
         const factor = ev.deltaY < 0 ? 1 / 1.15 : 1.15;
         this.core.zoomAt(factor, centerIndex);
@@ -194,7 +227,11 @@ export function createEmbedAPI(): ChartEmbedAPI {
           const dy = t1.clientY - t0.clientY;
           this._pinchStartDist = Math.hypot(dx, dy);
           this._pinchStartCenterClientX = (t0.clientX + t1.clientX) / 2 - canvas.getBoundingClientRect().left;
-          const mapped = renderer.mapClientToData(this._pinchStartCenterClientX, (canvas.height / (window.devicePixelRatio || 1)) / 2, this._getPrimarySeriesData(), this.opts);
+          const vr = this.core!.getVisibleRange();
+          const touchOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
+            ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+            : this.opts;
+          const mapped = renderer.mapClientToData(this._pinchStartCenterClientX, (canvas.height / (window.devicePixelRatio || 1)) / 2, this._getPrimarySeriesData(), touchOpts);
           this._pinchStartCenterIndex = mapped ? mapped.index : undefined;
         }
       };
@@ -223,15 +260,22 @@ export function createEmbedAPI(): ChartEmbedAPI {
       };
 
       canvas.addEventListener('pointerdown', onPointerDown);
-      canvas.addEventListener('pointermove', onPointerMove);
+      window.addEventListener('pointermove', onPointerMove);
       window.addEventListener('pointerup', onPointerUp);
       canvas.addEventListener('wheel', onWheel, { passive: false });
       canvas.addEventListener('touchstart', onTouchStart, { passive: false });
       canvas.addEventListener('touchmove', onTouchMove, { passive: false });
       canvas.addEventListener('touchend', onTouchEnd);
 
+      // handle lost pointer capture (e.g., when window loses focus)
+      const onLostPointerCapture = () => {
+        this.dragging = false;
+        this.pointerId = null;
+      };
+      canvas.addEventListener('lostpointercapture', onLostPointerCapture);
+
       // store listeners for later detach
-      (this as any)._listeners = { onPointerDown, onPointerMove, onPointerUp, onWheel, onTouchStart, onTouchMove, onTouchEnd };
+      (this as any)._listeners = { onPointerDown, onPointerMove, onPointerUp, onWheel, onTouchStart, onTouchMove, onTouchEnd, onLostPointerCapture };
     }
 
     private _getPrimarySeriesData() {
@@ -330,12 +374,13 @@ export function createEmbedAPI(): ChartEmbedAPI {
       const l = (this as any)._listeners;
       if (canvas && l) {
         canvas.removeEventListener('pointerdown', l.onPointerDown);
-        canvas.removeEventListener('pointermove', l.onPointerMove);
+        window.removeEventListener('pointermove', l.onPointerMove);
         window.removeEventListener('pointerup', l.onPointerUp);
         canvas.removeEventListener('wheel', l.onWheel as EventListener);
         canvas.removeEventListener('touchstart', l.onTouchStart as EventListener);
         canvas.removeEventListener('touchmove', l.onTouchMove as EventListener);
         canvas.removeEventListener('touchend', l.onTouchEnd as EventListener);
+        canvas.removeEventListener('lostpointercapture', l.onLostPointerCapture);
       }
       if (this.tooltipEl && this.tooltipEl.parentElement) this.tooltipEl.parentElement.removeChild(this.tooltipEl);
       if (this.legendEl && this.legendEl.parentElement) this.legendEl.parentElement.removeChild(this.legendEl);

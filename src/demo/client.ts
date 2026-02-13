@@ -14,7 +14,14 @@ async function init() {
 
   try {
     const embed = createEmbedAPI();
-    const core = await embed.create(container, { enableTooltip: true, showLegend: true, symbol: 'MSFT' });
+    const core = await embed.create(container, { 
+      enableTooltip: true, 
+      showLegend: true, 
+      symbol: 'MSFT',
+      // Default view: last 3 months with 2-3 weeks right margin
+      defaultVisibleDays: 90,
+      rightMarginDays: 18
+    });
     
     const seriesId = await core.addSeries({ 
       id: 'msft', 

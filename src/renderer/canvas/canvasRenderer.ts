@@ -79,11 +79,15 @@ export class CanvasRenderer {
 
     // visible window: allow override via options.startIndex/options.visibleCount
     const defaultMaxVisible = options?.maxVisibleBars ?? 200;
+    const rightMarginBars = (options as any)?.rightMarginBars ?? 0;
     const visibleCount = Math.min(options?.visibleCount ?? defaultMaxVisible, data.length);
     let start = typeof options?.startIndex === 'number' ? options!.startIndex : Math.max(0, data.length - visibleCount);
     if (start < 0) start = 0;
     if (start + visibleCount > data.length) start = Math.max(0, data.length - visibleCount);
     const visible = data.slice(start, Math.min(data.length, start + visibleCount));
+    
+    // Total slots includes right margin for empty space
+    const totalSlots = visible.length + rightMarginBars;
 
     // compute visible price range
     let min = Number.POSITIVE_INFINITY;
@@ -148,7 +152,7 @@ export class CanvasRenderer {
     }
 
     // draw candles
-    const stepX = plotW / Math.max(1, visible.length - 1);
+    const stepX = plotW / Math.max(1, totalSlots - 1);
     const candleW = Math.max(2, Math.min(Math.floor(stepX * 0.7), 40));
     const outlineColor = options?.outlineColor || '#222222';
     const wickColor = options?.wickColor || outlineColor;
@@ -218,7 +222,7 @@ export class CanvasRenderer {
     this.ctx.beginPath(); this.ctx.moveTo(plotX, plotY + plotH); this.ctx.lineTo(plotX + plotW, plotY + plotH); this.ctx.stroke();
   }
 
-  getLayout(data: Array<any>, options?: { yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number; paddingRatio?: number; minPaddingPx?: number }) {
+  getLayout(data: Array<any>, options?: { yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number; paddingRatio?: number; minPaddingPx?: number; rightMarginBars?: number }) {
     const w = this.canvas.clientWidth || 800;
     const h = this.canvas.clientHeight || 600;
     const gutterLeft = options?.yAxisGutterPx ?? 56;
@@ -231,11 +235,14 @@ export class CanvasRenderer {
     const plotH = h - gutterTop - xAxisHeight - 6;
 
     const defaultMaxVisible = options?.maxVisibleBars ?? 200;
+    const rightMarginBars = options?.rightMarginBars ?? 0;
     const visibleCount = Math.min(options?.visibleCount ?? defaultMaxVisible, data.length);
     let start = typeof options?.startIndex === 'number' ? options!.startIndex : Math.max(0, data.length - visibleCount);
     if (start < 0) start = 0;
     if (start + visibleCount > data.length) start = Math.max(0, data.length - visibleCount);
     const visible = data.slice(start, Math.min(data.length, start + visibleCount));
+    
+    const totalSlots = visible.length + rightMarginBars;
 
     // compute visible price range
     let min = Number.POSITIVE_INFINITY;
@@ -246,10 +253,10 @@ export class CanvasRenderer {
     const yMin = min - Math.max(pad, options?.minPaddingPx ?? 6);
     const yMax = max + Math.max(pad, options?.minPaddingPx ?? 6);
 
-    const stepX = plotW / Math.max(1, visible.length - 1);
+    const stepX = plotW / Math.max(1, totalSlots - 1);
     const candleW = Math.max(2, Math.min(Math.floor(stepX * 0.7), 40));
 
-    return { plotX, plotY, plotW, plotH, gutterLeft, gutterTop, xAxisHeight, startIndex: start, visibleCount: visible.length, stepX, candleW, yMin, yMax };
+    return { plotX, plotY, plotW, plotH, gutterLeft, gutterTop, xAxisHeight, startIndex: start, visibleCount: visible.length, stepX, candleW, yMin, yMax, rightMarginBars };
   }
 
   mapClientToData(clientX: number, clientY: number, data: Array<any>, options?: { yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number; paddingRatio?: number; minPaddingPx?: number }) {
@@ -271,27 +278,45 @@ export class CanvasRenderer {
 
   drawCrosshairAt(clientX: number, clientY: number, data: Array<any>, options?: { color?: string; lineWidth?: number; yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number }) {
     const layout = this.getLayout(data, options);
-    const { plotX, plotY, plotW, plotH, startIndex, visibleCount, stepX } = layout;
+    const { plotX, plotY, plotW, plotH, startIndex, visibleCount, stepX, yMin, yMax } = layout as any;
     const mapped = this.mapClientToData(clientX, clientY, data, options);
     if (!mapped) return;
     const x = mapped.x;
-    const priceY = (() => {
-      const { yMin, yMax } = layout as any;
-      const p = mapped.point.close;
-      const t = (p - yMin) / (yMax - yMin || 1);
-      return plotY + (1 - t) * plotH;
-    })();
+    
+    // Clamp Y to plot area
+    const clampedY = Math.max(plotY, Math.min(plotY + plotH, clientY));
+    
+    // Calculate price at current Y position
+    const t = 1 - (clampedY - plotY) / plotH;
+    const priceAtY = yMin + t * (yMax - yMin);
 
     this.ctx.save();
     this.ctx.strokeStyle = options?.color ?? '#666666';
     this.ctx.lineWidth = options?.lineWidth ?? 1;
-    // vertical
+    // vertical line at candle
     this.ctx.beginPath(); this.ctx.moveTo(x + 0.5, plotY); this.ctx.lineTo(x + 0.5, plotY + plotH); this.ctx.stroke();
-    // horizontal at price
-    this.ctx.beginPath(); this.ctx.moveTo(plotX, priceY + 0.5); this.ctx.lineTo(plotX + plotW, priceY + 0.5); this.ctx.stroke();
-    // small circle at candle center
+    // horizontal line at cursor Y position
+    this.ctx.beginPath(); this.ctx.moveTo(plotX, clampedY + 0.5); this.ctx.lineTo(plotX + plotW, clampedY + 0.5); this.ctx.stroke();
+    
+    // Draw price label on Y axis
+    const labelText = this.formatPrice(priceAtY);
+    this.ctx.font = '11px sans-serif';
+    this.ctx.textAlign = 'right';
+    this.ctx.textBaseline = 'middle';
+    const labelPadding = 4;
+    const labelWidth = this.ctx.measureText(labelText).width + labelPadding * 2;
+    const labelHeight = 16;
+    const labelX = plotX - 4;
+    const labelY = clampedY;
+    
+    // Background for label
     this.ctx.fillStyle = options?.color ?? '#666666';
-    this.ctx.beginPath(); this.ctx.arc(x, priceY, 3, 0, Math.PI * 2); this.ctx.fill();
+    this.ctx.fillRect(labelX - labelWidth, labelY - labelHeight / 2, labelWidth, labelHeight);
+    
+    // Label text
+    this.ctx.fillStyle = '#ffffff';
+    this.ctx.fillText(labelText, labelX - labelPadding, labelY);
+    
     this.ctx.restore();
   }
 

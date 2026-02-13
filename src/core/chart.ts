@@ -4,6 +4,10 @@ export interface ChartCoreOptions {
   height?: number;
   locale?: string;
   theme?: 'light' | 'dark';
+  /** Default visible period in days (e.g., 90 for 3 months). If not set, shows maxVisibleBars. */
+  defaultVisibleDays?: number;
+  /** Right margin in days for whitespace after latest data (e.g., 14-21 for 2-3 weeks) */
+  rightMarginDays?: number;
 }
 
 export interface SeriesOptions {
@@ -30,6 +34,7 @@ export class ChartCore {
   // viewport state (indices relative to series data)
   private viewportStartIndex: number = 0;
   private viewportVisibleCount: number = 200;
+  private rightMarginBars: number = 0;
 
   // simple event emitter
   private listeners: Map<string, Set<(payload?: any) => void>> = new Map();
@@ -115,6 +120,8 @@ export class ChartCore {
       entry.data.splice(entry.data.length - data.length, data.length, ...data);
     } else {
       entry.data = data.slice();
+      // Apply default viewport settings on fresh data load
+      this.applyDefaultViewport(data);
     }
     this.seriesStore.set(seriesId, entry);
     // emit update
@@ -123,8 +130,38 @@ export class ChartCore {
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       try {
-        renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount }));
+        renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars }));
       } catch (e) { console.warn(e); }
+    }
+  }
+
+  private applyDefaultViewport(data: any[]): void {
+    if (data.length === 0) return;
+    
+    const defaultVisibleDays = this.options.defaultVisibleDays;
+    const rightMarginDays = this.options.rightMarginDays ?? 0;
+    
+    if (defaultVisibleDays && data.length >= 2) {
+      // Estimate average bar duration from data
+      const firstTime = data[0].time;
+      const lastTime = data[data.length - 1].time;
+      const totalMs = lastTime - firstTime;
+      const avgBarMs = totalMs / (data.length - 1);
+      const msPerDay = 24 * 60 * 60 * 1000;
+      
+      // Calculate visible count based on days
+      const visibleBars = Math.ceil((defaultVisibleDays * msPerDay) / avgBarMs);
+      const marginBars = Math.ceil((rightMarginDays * msPerDay) / avgBarMs);
+      
+      // Set viewport to show last N bars with right margin
+      this.viewportVisibleCount = Math.min(data.length, visibleBars);
+      this.viewportStartIndex = Math.max(0, data.length - visibleBars);
+      this.rightMarginBars = marginBars;
+    } else {
+      // Default behavior: show last 200 bars
+      this.viewportVisibleCount = Math.min(200, data.length);
+      this.viewportStartIndex = Math.max(0, data.length - this.viewportVisibleCount);
+      this.rightMarginBars = 0;
     }
   }
 
@@ -170,12 +207,12 @@ export class ChartCore {
     this.emit('seriesUpdated', { seriesId, realtime: true });
   }
 
-  getVisibleRange(): { from: number; to: number } | null {
+  getVisibleRange(): { from: number; to: number; rightMarginBars?: number } | null {
     const len = this.getDataLength();
     if (len === 0) return null;
     const from = Math.max(0, Math.min(len - 1, this.viewportStartIndex));
     const to = Math.max(0, Math.min(len - 1, this.viewportStartIndex + this.viewportVisibleCount - 1));
-    return { from, to };
+    return { from, to, rightMarginBars: this.rightMarginBars };
   }
 
   setVisibleRange(from: number, to: number): void {
@@ -191,7 +228,7 @@ export class ChartCore {
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
@@ -209,7 +246,7 @@ export class ChartCore {
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
@@ -230,7 +267,7 @@ export class ChartCore {
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
