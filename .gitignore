@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+
+# OS specific
+.DS_Store
+
+# Env
+.env
