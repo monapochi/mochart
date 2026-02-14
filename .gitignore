@@ -3,9 +3,13 @@ node_modules/
 
 # Build outputs
 dist/
+*.js.map
 
 # OS specific
 .DS_Store
+
+# IDE
+.vscode/
 
 # Env
 .env
