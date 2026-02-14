@@ -22,6 +22,17 @@ export interface ChartEmbedAPI {
   destroy(): Promise<void>;
 }
 
+type ListenerBag = {
+  onPointerDown: (ev: PointerEvent) => void;
+  onPointerMove: (ev: PointerEvent) => void;
+  onPointerUp: (ev: PointerEvent) => void;
+  onWheel: (ev: WheelEvent) => void;
+  onTouchStart: (ev: TouchEvent) => void;
+  onTouchMove: (ev: TouchEvent) => void;
+  onTouchEnd: (ev: TouchEvent) => void;
+  onLostPointerCapture: () => void;
+};
+
 // Factory that returns a minimal API object. Implementation lives in src/core/chart.ts
 export function createEmbedAPI(): ChartEmbedAPI {
   // Concrete embed API implementation: owns DOM event wiring and tooltip
@@ -35,7 +46,8 @@ export function createEmbedAPI(): ChartEmbedAPI {
     private dragging = false;
     private dragStartX = 0;
     private dragStartIndex = 0;
-    private opts: any = {};
+    private opts: ChartEmbedOptions = {};
+    private listenersRef: ListenerBag | null = null;
     // touch pinch state
     private _pinchStartDist: number | null = null;
     private _pinchLastDist: number | null = null;
@@ -44,7 +56,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
     private _pinchStartCenterRatio: number | undefined = undefined;
     private _wheelPanRemainderPx: number = 0;
 
-    async create(container: HTMLElement, options?: any): Promise<ChartCore> {
+    async create(container: HTMLElement, options?: ChartEmbedOptions): Promise<ChartCore> {
       const mod = await import('./chart');
       this.container = container;
       this.opts = options ?? {};
@@ -69,8 +81,6 @@ export function createEmbedAPI(): ChartEmbedAPI {
     private attachEvents() {
       const canvas = this.getCanvas();
       if (!canvas || !this.core) return;
-      const renderer = (this.core as any)._renderer as any;
-      if (!renderer) return;
 
       const onPointerDown = (ev: PointerEvent) => {
         canvas.setPointerCapture(ev.pointerId);
@@ -84,14 +94,12 @@ export function createEmbedAPI(): ChartEmbedAPI {
       const onPointerMove = (ev: PointerEvent) => {
         if (!this.core) return;
         if (this.dragging && this.pointerId === ev.pointerId) {
-          const seriesStore = (this.core as any).seriesStore as any;
-          const primaryEntry = seriesStore ? Array.from(seriesStore.values())[0] as any : null;
-          const primaryData = primaryEntry?.data ?? [];
+          const primaryData = this._getPrimarySeriesData();
           const vr = this.core!.getVisibleRange();
           const dragOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
             ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
             : this.opts;
-          const layout = renderer.getLayout ? renderer.getLayout(primaryData, dragOpts) : null;
+          const layout = this.core.getLayout(dragOpts);
           const stepX = layout ? layout.stepX : 10;
           const dx = ev.clientX - this.dragStartX;
           const deltaIndex = Math.round(-dx / stepX);
@@ -107,9 +115,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
           const rect = canvas.getBoundingClientRect();
           const mx = ev.clientX - rect.left;
           const my = ev.clientY - rect.top;
-          const seriesStore = (this.core as any).seriesStore as any;
-          const primaryEntry = seriesStore ? Array.from(seriesStore.values())[0] as any : null;
-          const data = primaryEntry?.data ?? [];
+          const data = this._getPrimarySeriesData();
           
           // Get current viewport and create opts with it
           const vr = this.core!.getVisibleRange();
@@ -117,25 +123,25 @@ export function createEmbedAPI(): ChartEmbedAPI {
             ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
             : this.opts;
           
-          const mapped = renderer.mapClientToData(mx, my, data, viewportOpts);
-          const layout = renderer.getLayout ? renderer.getLayout(data, viewportOpts) : null;
+          const mapped = this.core.mapClientToData(mx, my, viewportOpts);
+          const layout = this.core.getLayout(viewportOpts);
           
           // Check if cursor is in plot area
           const inPlotArea = layout && mx >= layout.plotX && mx <= layout.plotX + layout.plotW
             && my >= layout.plotY && my <= layout.plotY + layout.plotH;
           
-          const primarySeriesId = Array.from((this.core as any).seriesStore.keys())[0];
-          const entry = (this.core as any).seriesStore.get(primarySeriesId) as any;
+          const primarySeriesId = this.core.getPrimarySeriesId();
+          const entry = primarySeriesId ? this.core.getSeriesEntry(primarySeriesId) : null;
           
           // Always redraw series first
-          if (renderer && typeof renderer.drawSeries === 'function') {
-            renderer.drawSeries(primarySeriesId, entry?.data ?? [], Object.assign({}, entry?.options ?? {}, viewportOpts));
+          if (primarySeriesId) {
+            this.core.redraw();
           }
           
           // Crosshair: show when in plot area (independent of tooltip)
           const enableCrosshair = this.opts.enableCrosshair !== false; // default true
-          if (enableCrosshair && inPlotArea && mapped && renderer) {
-            renderer.drawCrosshairAt(mx, my, entry?.data ?? [], viewportOpts);
+          if (enableCrosshair && inPlotArea && mapped) {
+            this.core.drawCrosshair(mx, my, viewportOpts);
           }
           
           // Tooltip: completely independent, show when over candle
@@ -211,7 +217,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
         const cx = ev.clientX - rect.left;
         const mx = cx;
         const vr = this.core!.getVisibleRange();
-        const rawStartIndex = (this.core as any)?.viewportStartIndex;
+        const rawStartIndex = this.core.getRawStartIndex();
         const wheelOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
           ? { ...this.opts, startIndex: (typeof rawStartIndex === 'number' ? rawStartIndex : vr.from), visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
           : this.opts;
@@ -219,21 +225,21 @@ export function createEmbedAPI(): ChartEmbedAPI {
         if (ev.ctrlKey) {
           // Pinch-to-zoom on Mac trackpad (or Ctrl+wheel on mouse)
           this._wheelPanRemainderPx = 0;
-          const mapped = renderer.mapClientToData(mx, rect.height / 2, this._getPrimarySeriesData(), wheelOpts);
+          const mapped = this.core.mapClientToData(mx, rect.height / 2, wheelOpts);
           const centerIndex = mapped ? mapped.index : undefined;
           const factor = ev.deltaY < 0 ? 1 / 1.15 : 1.15;
           this.core.zoomAt(factor, centerIndex);
         } else {
           // Two-finger slide / wheel scroll: pan only (avoid unintended zoom)
           const primaryData = this._getPrimarySeriesData();
-          const layout = renderer.getLayout ? renderer.getLayout(primaryData, wheelOpts) : null;
+          const layout = this.core.getLayout(wheelOpts);
           const stepX = layout ? layout.stepX : 10;
           const dominantDelta = Math.abs(ev.deltaX) >= Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
           const smoothScroll = this.opts.smoothScroll !== false;
-          if (smoothScroll && typeof (this.core as any).panByBars === 'function') {
+          if (smoothScroll) {
             this._wheelPanRemainderPx = 0;
             const deltaBars = dominantDelta / Math.max(1e-6, stepX);
-            if (deltaBars !== 0) (this.core as any).panByBars(deltaBars);
+            if (deltaBars !== 0) this.core.panByBars(deltaBars);
           } else {
             const accumulatedPx = this._wheelPanRemainderPx + dominantDelta;
             const deltaIndex = accumulatedPx > 0
@@ -263,7 +269,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
           const touchOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
             ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
             : this.opts;
-          const layout = renderer.getLayout ? renderer.getLayout(this._getPrimarySeriesData(), touchOpts) : null;
+          const layout = this.core.getLayout(touchOpts);
           if (layout && typeof this._pinchStartCenterClientX === 'number') {
             const localX = this._pinchStartCenterClientX - layout.plotX;
             const slot = localX / Math.max(1e-6, layout.stepX);
@@ -273,7 +279,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
             this._pinchStartCenterRatio = undefined;
           }
           const rect = canvas.getBoundingClientRect();
-          const mapped = renderer.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, this._getPrimarySeriesData(), touchOpts);
+          const mapped = this.core.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, touchOpts);
           this._pinchStartCenterIndex = mapped ? mapped.index : undefined;
         }
       };
@@ -296,7 +302,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
               ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
               : this.opts;
             const rect = canvas.getBoundingClientRect();
-            const mappedAfter = renderer.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, this._getPrimarySeriesData(), touchOpts);
+            const mappedAfter = this.core.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, touchOpts);
             if (mappedAfter) {
               const correction = this._pinchStartCenterIndex - mappedAfter.index;
               if (correction !== 0) this.core.panBy(correction);
@@ -333,15 +339,12 @@ export function createEmbedAPI(): ChartEmbedAPI {
       canvas.addEventListener('lostpointercapture', onLostPointerCapture);
 
       // store listeners for later detach
-      (this as any)._listeners = { onPointerDown, onPointerMove, onPointerUp, onWheel, onTouchStart, onTouchMove, onTouchEnd, onLostPointerCapture };
+      this.listenersRef = { onPointerDown, onPointerMove, onPointerUp, onWheel, onTouchStart, onTouchMove, onTouchEnd, onLostPointerCapture };
     }
 
     private _getPrimarySeriesData() {
       if (!this.core) return [];
-      const keys = Array.from((this.core as any).seriesStore.keys());
-      if (keys.length === 0) return [];
-      const entry = (this.core as any).seriesStore.get(keys[0]);
-      return entry?.data ?? [];
+      return Array.from(this.core.getPrimaryData());
     }
 
     enableTooltip(v: boolean) {
@@ -429,7 +432,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
     async destroy(): Promise<void> {
       // detach events
       const canvas = this.getCanvas();
-      const l = (this as any)._listeners;
+      const l = this.listenersRef;
       if (canvas && l) {
         canvas.removeEventListener('pointerdown', l.onPointerDown);
         window.removeEventListener('pointermove', l.onPointerMove);
@@ -446,6 +449,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
       if (this.core) await this.core.destroy();
       this.handlers.clear();
       this.core = null; this.container = null; this.tooltipEl = null;
+      this.listenersRef = null;
     }
 
     // public convenience methods

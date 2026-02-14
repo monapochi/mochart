@@ -24,10 +24,32 @@ export interface SeriesOptions {
 
 import { CanvasRenderer } from '../renderer/canvas/canvasRenderer';
 
+type RendererViewportOptions = {
+  startIndex?: number;
+  visibleCount?: number;
+  rightMarginBars?: number;
+  yAxisGutterPx?: number;
+  xAxisHeightPx?: number;
+  maxVisibleBars?: number;
+  paddingRatio?: number;
+  minPaddingPx?: number;
+  color?: string;
+  lineWidth?: number;
+};
+
+type ViewportRenderer = {
+  drawSeries: (seriesId: string, data: Array<any>, options?: RendererViewportOptions) => void;
+  getLayout: (data: Array<any>, options?: RendererViewportOptions) => any;
+  mapClientToData: (clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) => any;
+  drawCrosshairAt: (clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) => void;
+};
+
 // Minimal ChartCore skeleton to be expanded.
 export class ChartCore {
   private container: HTMLElement;
   private options: ChartCoreOptions;
+  private renderer: ViewportRenderer | null = null;
+  private adapter: any | null = null;
 
   // internal series store: id -> {options, data}
   private seriesStore: Map<string, { options: SeriesOptions; data: any[] }> = new Map();
@@ -58,7 +80,7 @@ export class ChartCore {
       const canvas = (this.container.tagName.toLowerCase() === 'canvas')
         ? (this.container as unknown as HTMLCanvasElement)
         : (this.container.querySelector('canvas') as HTMLCanvasElement) ?? this.createCanvas();
-      (this as any)._renderer = new CanvasRenderer(canvas);
+      this.renderer = new CanvasRenderer(canvas) as unknown as ViewportRenderer;
     } catch (e) {
       console.warn('CanvasRenderer init failed', e);
     }
@@ -88,10 +110,10 @@ export class ChartCore {
     if (typeof adapter.subscribe !== 'function') {
       console.warn('Adapter does not implement subscribe/unsubscribe — storing adapter only');
       // store adapter for future use
-      (this as any)._adapter = adapter;
+      this.adapter = adapter;
       return;
     }
-    (this as any)._adapter = adapter;
+    this.adapter = adapter;
     // subscribe all series if adapter supports it
     for (const seriesId of this.seriesStore.keys()) {
       try {
@@ -104,13 +126,13 @@ export class ChartCore {
   }
 
   async disconnectFeed(): Promise<void> {
-    const adapter = (this as any)._adapter;
+    const adapter = this.adapter;
     if (adapter && typeof adapter.unsubscribe === 'function') {
       for (const seriesId of this.seriesStore.keys()) {
         try { adapter.unsubscribe(seriesId); } catch {};
       }
     }
-    delete (this as any)._adapter;
+    this.adapter = null;
     this.emit('realtimeDisconnected');
   }
 
@@ -137,7 +159,7 @@ export class ChartCore {
     // emit update
     this.emit('seriesUpdated', { seriesId, length: entry.data.length });
     // render immediately on canvas renderer if available
-    const renderer = (this as any)._renderer;
+    const renderer = this.renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       try {
@@ -244,7 +266,7 @@ export class ChartCore {
     this.viewportVisibleCount = Math.max(1, t - f + 1);
     this.emitRangeChanged();
     // force redraw of all series
-    const renderer = (this as any)._renderer;
+    const renderer = this.renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
@@ -267,7 +289,7 @@ export class ChartCore {
     const maxStart = Math.max(0, len - this.viewportVisibleCount);
     this.viewportStartIndex = Math.max(0, Math.min(maxStart, this.viewportStartIndex + deltaBars));
     this.emitRangeChanged();
-    const renderer = (this as any)._renderer;
+    const renderer = this.renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
@@ -295,7 +317,7 @@ export class ChartCore {
     this.viewportStartIndex = newStart;
     this.viewportVisibleCount = newCount;
     this.emitRangeChanged();
-    const renderer = (this as any)._renderer;
+    const renderer = this.renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
       const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
@@ -309,6 +331,86 @@ export class ChartCore {
     this.emit('optionsChanged', this.options);
   }
 
+  getRawStartIndex(): number {
+    return this.viewportStartIndex;
+  }
+
+  getPrimarySeriesId(): string | null {
+    const first = this.seriesStore.keys().next();
+    return first.done ? null : first.value;
+  }
+
+  getPrimaryData(): readonly any[] {
+    const id = this.getPrimarySeriesId();
+    if (!id) return [];
+    const entry = this.seriesStore.get(id);
+    return entry?.data ?? [];
+  }
+
+  getPrimarySeriesOptions(): SeriesOptions | null {
+    const id = this.getPrimarySeriesId();
+    if (!id) return null;
+    const entry = this.seriesStore.get(id);
+    return entry?.options ?? null;
+  }
+
+  getSeriesEntry(seriesId: string): { options: SeriesOptions; data: readonly any[] } | null {
+    const entry = this.seriesStore.get(seriesId);
+    if (!entry) return null;
+    return { options: entry.options, data: entry.data };
+  }
+
+  getLayout(options?: any): any | null {
+    const renderer = this.renderer;
+    if (!renderer || typeof renderer.getLayout !== 'function') return null;
+    const data = this.getPrimaryData() as Array<any>;
+    const vr = this.getVisibleRange();
+    const viewport = vr
+      ? { startIndex: this.viewportStartIndex, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+      : {};
+    return renderer.getLayout(data, { ...viewport, ...options });
+  }
+
+  mapClientToData(clientX: number, clientY: number, options?: any): any | null {
+    const renderer = this.renderer;
+    if (!renderer || typeof renderer.mapClientToData !== 'function') return null;
+    const data = this.getPrimaryData() as Array<any>;
+    const vr = this.getVisibleRange();
+    const viewport = vr
+      ? { startIndex: this.viewportStartIndex, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+      : {};
+    return renderer.mapClientToData(clientX, clientY, data, { ...viewport, ...options });
+  }
+
+  drawCrosshair(clientX: number, clientY: number, options?: any): void {
+    const renderer = this.renderer;
+    if (!renderer || typeof renderer.drawCrosshairAt !== 'function') return;
+    const data = this.getPrimaryData() as Array<any>;
+    const vr = this.getVisibleRange();
+    const viewport = vr
+      ? { startIndex: this.viewportStartIndex, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+      : {};
+    renderer.drawCrosshairAt(clientX, clientY, data, { ...viewport, ...options });
+  }
+
+  redraw(): void {
+    const renderer = this.renderer;
+    if (!renderer || typeof renderer.drawSeries !== 'function') return;
+    const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
+    for (const [seriesId, entry] of this.seriesStore.entries()) {
+      try {
+        renderer.drawSeries(seriesId, entry.data, {
+          ...entry.options,
+          startIndex: this.viewportStartIndex,
+          visibleCount: this.viewportVisibleCount,
+          rightMarginBars: effectiveRightMarginBars,
+        });
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+  }
+
   resize(): void {
     // handle container resize
     this.emit('resize');
@@ -319,6 +421,8 @@ export class ChartCore {
     await this.disconnectFeed();
     this.seriesStore.clear();
     this.listeners.clear();
+    this.adapter = null;
+    this.renderer = null;
   }
 }
 
