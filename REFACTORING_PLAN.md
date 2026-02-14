@@ -44,14 +44,15 @@
 |---|---------|------|--------|
 | P1 | **二重系統** | `ChartCore` と `MoChart` が同じ責務を別々に実装 | 🔴 致命 |
 | P2 | **レイヤー突き抜け** | EmbedAPI が `(core as any)._renderer` / `.seriesStore` / `.viewportStartIndex` を直接参照 | 🔴 致命 |
-| P3 | **同期ブロッキング描画** | pan/zoom のたびに即座に全面再描画。1フレーム内に複数回描画が走る | 🟠 重大 |
+| P3 | **同期ブロッキング描画** | pan/zoom のたびに即座に全面再描画。1フレーム内に最大4回描画が走る | 🟠 重大 |
 | P4 | **ミュータブル状態散在** | viewport 状態が `ChartCore` 内で直接変更、スナップショット不可 | 🟠 重大 |
 | P5 | **インターフェース不一致** | `CanvasRenderer` が `ChartRenderer` interface を実装していない | 🟠 重大 |
-| P6 | **全量データコピー** | `setSeriesData` で配列を `.slice()` コピー、差分更新なし | 🟡 中 |
-| P7 | **全量再計算** | Indicator が毎回 O(n) フル再計算（incremental `update()` 未使用） | 🟡 中 |
-| P8 | **型安全性の喪失** | `(this.core as any)` が 12箇所、private field を 6つ外部参照 | 🟡 中 |
-| P9 | **GC プレッシャー** | `drawSeries` 内で毎フレーム `data.slice()` + `Date` + 配列生成 | 🟡 中 |
-| P10 | **リサイズ未対応** | ResizeObserver なし、DPR 変更未検知 | ⚪ 軽 |
+| P6 | **リクエスト結合なし** | pinch の zoomAt+panBy、hover の redraw+crosshair が個別に描画。batch API なし | 🟠 重大 |
+| P7 | **全量データコピー** | `setSeriesData` で配列を `.slice()` コピー、差分更新なし | 🟡 中 |
+| P8 | **全量再計算** | Indicator が毎回 O(n) フル再計算（incremental `update()` 未使用） | 🟡 中 |
+| P9 | **型安全性の喪失** | `(this.core as any)` が 12箇所、private field を 6つ外部参照 | 🟡 中 |
+| P10 | **GC プレッシャー** | `drawSeries` 内で毎フレーム `data.slice()` + `Date` + 配列生成 | 🟡 中 |
+| P11 | **リサイズ未対応** | ResizeObserver なし、DPR 変更未検知 | ⚪ 軽 |
 
 ---
 
@@ -64,6 +65,7 @@
 | **Immutable State** | mutable fields を直接変更 | `Readonly<ChartState>` + pure reducer |
 | **Unidirectional Flow** | EmbedAPI → Core ← Renderer 双方向 | Action → Store → Scheduler → Renderer 一方向 |
 | **Non-blocking Render** | 同期即時描画 | rAF バッチ + dirty flag コアレッセンス |
+| **Action Batching** | 各操作が即 drawSeries 呼出 | 複数 Action を1フレームにまとめて1回描画 |
 | **Streaming / Incremental** | 全量コピー・全量再計算 | append-only + incremental indicator |
 | **Interface Segregation** | 具象クラス直参照 | trait (interface) 経由のみ |
 | **Zero-copy** | slice/spread コピー多数 | TypedArray view + offset 参照 |
@@ -155,6 +157,210 @@ Action                          Action
          └────────────────────────────────────────────────────────┘
 ```
 
+### 2.4 バッチ処理・コアレッセンス設計
+
+現状、以下の操作が **それぞれ独立に即座に描画** を呼んでいる:
+
+```
+現状: ピンチズーム1フレーム内の呼び出し
+
+  onTouchMove
+    ├─ core.zoomAt(factor)   → drawSeries() ①   ← 全面再描画
+    └─ core.panBy(correction) → drawSeries() ②  ← 全面再描画  (①は捨てられる)
+
+  onPointerMove (hover直後)
+    ├─ renderer.drawSeries() ③                    ← ゴースト除去のため再描画
+    └─ renderer.drawCrosshairAt() ④               ← クロスヘア上書き
+
+  計: 1フレームに 4回描画 (うち3回は無駄)
+```
+
+#### 2.4.1 Action コアレッセンス
+
+同じフレーム内の同種 Action は **マージ** して1つにする:
+
+```typescript
+// src/core/actionQueue.ts
+
+type ActionQueue = {
+  pending: Action[];
+  scheduled: boolean;
+};
+
+function coalesce(actions: Action[]): Action[] {
+  // 同種 Action をマージ
+  const merged: Action[] = [];
+  let panAccum = 0;
+  let lastZoom: Action | null = null;
+
+  for (const a of actions) {
+    switch (a.type) {
+      case 'PAN':
+        panAccum += a.deltaBars;           // PAN は加算マージ
+        break;
+      case 'ZOOM':
+        lastZoom = a;                       // ZOOM は最後のものだけ採用
+        break;
+      case 'APPEND_BAR':
+        // 同一 seriesId は最後の bar だけ (tick 更新)
+        // 異なる time の bar は全て保持 (新 bar 追加)
+        merged.push(a);
+        break;
+      default:
+        merged.push(a);
+    }
+  }
+
+  // マージ結果を順序保持で emit
+  if (lastZoom) merged.push(lastZoom);
+  if (panAccum !== 0) merged.push({ type: 'PAN', deltaBars: panAccum });
+
+  return merged;
+}
+```
+
+**効果**: ピンチの `zoomAt + panBy` 補正が1回の state 変更に。
+
+#### 2.4.2 Render コアレッセンス (rAF バッチ)
+
+```typescript
+// src/core/scheduler.ts
+
+class RenderScheduler {
+  private actionQueue: Action[] = [];
+  private rafId: number | null = null;
+  private store: ChartStore;
+  private renderer: ViewportRenderer;
+
+  // --- 公開 API ---
+
+  /** Action を enqueue。描画は次の rAF まで遅延 */
+  enqueue(action: Action): void {
+    this.actionQueue.push(action);
+    this.scheduleFlush();
+  }
+
+  /** 複数 Action を一括 enqueue (batch API) */
+  enqueueBatch(actions: Action[]): void {
+    this.actionQueue.push(...actions);
+    this.scheduleFlush();
+  }
+
+  /** 同期的に即時 flush (テスト用 / 強制更新) */
+  flushSync(): void {
+    this.cancelSchedule();
+    this.flush();
+  }
+
+  // --- 内部 ---
+
+  private scheduleFlush(): void {
+    if (this.rafId !== null) return; // 既にスケジュール済み
+    this.rafId = requestAnimationFrame(() => this.flush());
+  }
+
+  private cancelSchedule(): void {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+  }
+
+  private flush(): void {
+    this.rafId = null;
+
+    // 1. キュー内の Action をコアレッセンス
+    const actions = coalesce(this.actionQueue);
+    this.actionQueue.length = 0;  // clear (GC-free)
+    if (actions.length === 0) return;
+
+    // 2. まとめて reduce (N actions → 1 state transition)
+    let state = this.store.getState();
+    for (const action of actions) {
+      state = reduce(state, action);
+    }
+    this.store.setState(state);
+
+    // 3. 1回だけ描画
+    const snapshot = Object.freeze(state);
+    this.renderer.render(snapshot);
+  }
+}
+```
+
+#### 2.4.3 バッチ化の具体的な適用箇所
+
+| 現状のコード | 問題 | バッチ後 |
+|-------------|------|---------|
+| `panByBars()` → 即 `drawSeries()` × N series | pan のたび全系列再描画 | `enqueue({ type: 'PAN' })` → rAF で1回描画 |
+| `zoomAt()` → 即 `drawSeries()` × N series | zoom のたび全系列再描画 | `enqueue({ type: 'ZOOM' })` → rAF で1回描画 |
+| pinch: `zoomAt()` + `panBy()` | 1フレーム2回描画 | `enqueueBatch([ZOOM, PAN])` → coalesce → 1回描画 |
+| `setSeriesData()` → 即 `drawSeries()` | データ設定で即描画 | `enqueue({ type: 'SET_DATA' })` → rAF で1回描画 |
+| hover: `drawSeries()` + `drawCrosshairAt()` | 再描画 + オーバーレイ | `enqueue({ type: 'HOVER' })` → render + overlay を1回で |
+| `setVisibleRange(from, to)` → 即 `drawSeries()` | panBy の内部分岐 | `enqueue({ type: 'SET_VIEWPORT' })` |
+| リアルタイム tick 更新 (同一 time) | 1秒に数十回 drawSeries | `APPEND_BAR` coalesce → 最新 tick のみ残す |
+
+#### 2.4.4 ユーザー向け Batch API
+
+ライブラリ利用者が複数操作をアトミックにまとめられる API:
+
+```typescript
+// 公開 API
+chart.batch(() => {
+  chart.addSeries('candle', { ... });
+  chart.setData(ohlcv);
+  chart.addIndicator('bb', { period: 20 });
+  chart.addIndicator('rsi', { period: 14 });
+  chart.setViewport(100, 200);
+});
+// ← batch 終了時に 1回だけ描画
+
+// 内部実装
+class ChartHandle {
+  private batching = false;
+
+  batch(fn: () => void): void {
+    this.batching = true;
+    try {
+      fn();  // 各メソッドは enqueue するだけ
+    } finally {
+      this.batching = false;
+      this.scheduler.flushSync(); // batch 終了時に即 flush
+    }
+  }
+}
+```
+
+#### 2.4.5 Microtask コアレッセンス (rAF の前段)
+
+rAF は ~16ms 待つが、同期的なコードブロック内の複数 dispatch は **microtask** で先にまとめられる:
+
+```
+同期コードブロック:
+  dispatch(PAN)     → queue に追加
+  dispatch(ZOOM)    → queue に追加
+  dispatch(PAN)     → queue に追加
+  ── microtask checkpoint ──
+  queueMicrotask(() => {
+    coalesce queue  // PAN+PAN を1つにマージ, ZOOM は最終値
+    scheduleRaf()   // rAF はまだ先
+  })
+  ── rAF ──
+  flush()           // coalesced actions → 1 state → 1 render
+```
+
+これにより `batch()` API を使わなくても、同一 microtask 内の連続 dispatch は自動的にまとまる。
+
+#### 2.4.6 パフォーマンス見積もり
+
+| シナリオ | 現状 drawSeries 回数/frame | バッチ後 | 削減率 |
+|---------|---------------------------|---------|-------|
+| ピンチズーム | 2-3 | 1 | 50-67% |
+| マウスドラッグ pan + hover | 2 | 1 | 50% |
+| hover (crosshair + tooltip) | 2 | 1 | 50% |
+| リアルタイム tick (10回/秒) + pan | 最大12 | 1 | 92% |
+| `batch()` で初期化 (5操作) | 5 | 1 | 80% |
+
 ---
 
 ## 3. リファクタリング・フェーズ
@@ -219,42 +425,25 @@ function reduce(state: ChartState, action: Action): ChartState { ... }
 
 ---
 
-### Phase R2: Non-blocking Render Scheduler
-> 目的: 1フレームに1回だけ描画、interaction 優先
+### Phase R2: Non-blocking Render Scheduler + Action Batching
+> 目的: 1フレームに1回だけ描画。複数リクエストを1つにまとめる
 
-```typescript
-// 新ファイル: src/core/scheduler.ts
-
-class RenderScheduler {
-  private dirty = new Set<string>();
-  private rafId: number | null = null;
-  private renderer: ViewportRenderer;
-  private store: ChartStore;
-
-  markDirty(layer: 'viewport' | 'data' | 'indicator' | 'overlay') {
-    this.dirty.add(layer);
-    if (this.rafId === null) {
-      this.rafId = requestAnimationFrame(() => this.flush());
-    }
-  }
-
-  private flush() {
-    this.rafId = null;
-    const snapshot = Object.freeze(this.store.getState());
-    this.renderer.render(snapshot);
-    this.dirty.clear();
-  }
-}
-```
+詳細設計は §2.4 を参照。
 
 | # | タスク | 概要 |
 |---|--------|------|
-| R2-1 | `RenderScheduler` 実装 | dirty flag + rAF コアレッセンス |
-| R2-2 | panBy/zoomAt の即時 drawSeries を撤去 | store.dispatch → scheduler.markDirty に |
-| R2-3 | IntersectionObserver 統合 | 画面外で描画停止 |
-| R2-4 | ResizeObserver 統合 | container サイズ変更 → RESIZE action dispatch |
+| R2-1 | `ActionQueue` + `coalesce()` 実装 | 同種 Action のマージロジック (PAN 加算, ZOOM 最終値, APPEND_BAR 重複排除) |
+| R2-2 | `RenderScheduler` 実装 | `enqueue()` / `enqueueBatch()` / `flushSync()` + rAF コアレッセンス |
+| R2-3 | Microtask コアレッセンス | `queueMicrotask` で同期ブロック内の連続 dispatch を自動合体 |
+| R2-4 | panBy/zoomAt の即時 drawSeries を撤去 | `store.dispatch → scheduler.enqueue` に。全7箇所の即時描画を除去 |
+| R2-5 | `chart.batch()` 公開 API | ユーザーが複数操作をアトミックにまとめられる API |
+| R2-6 | IntersectionObserver 統合 | 画面外で rAF 停止、復帰時に1回 flush |
+| R2-7 | ResizeObserver 統合 | container サイズ変更 → `RESIZE` action enqueue |
 
-**成果物**: panBy → zoomAt → pan補正 の3連打が1回の描画で済む（pinch が劇的に改善）
+**成果物**:
+- pinch の `zoomAt + panBy` → 1回描画 (現状2-3回)
+- リアルタイム tick 10回/秒 + pan → 1回描画 (現状最大12回)
+- `batch()` で初期化5操作 → 1回描画
 
 ---
 
@@ -368,7 +557,9 @@ Indicators  →  DataStore (read-only)
 |------|--------------|-------------|
 | **状態管理** | mutable fields scattered | Immutable store + pure reducer |
 | **描画タイミング** | 即時・複数回/frame | rAF batch, 1回/frame |
+| **リクエスト結合** | 各操作が独立に描画 | Action coalesce + batch() API |
 | **データ更新** | 全量 slice コピー | append-only, zero-copy view |
+| **リアルタイム tick** | 毎 tick drawSeries | coalesce: 同一 time は最終値のみ |
 | **インジケータ更新** | O(n) full recalc | O(1) incremental update |
 | **レイヤー結合** | API→Core→Renderer 透過 (as any) | strict interface boundary |
 | **Renderer 切替** | 不可能 (concrete 直結) | Factory, runtime switchable |
@@ -455,6 +646,9 @@ export interface ViewportRenderer extends ChartRenderer {
 | **Immutable State** | Elm, Redux, SwiftUI | ChartStore + pure reducer |
 | **Unidirectional Data Flow** | Flux, Vuex | Action → Store → Renderer |
 | **Non-blocking / Async** | React Fiber, Tokio | rAF scheduler, IntersectionObserver |
+| **Request Coalescing** | Linux I/O scheduler, TCP Nagle | Action coalesce (PAN 加算, ZOOM 最終値) |
+| **Batched Commit** | React 18 auto-batching, DB transaction | `batch()` API, microtask boundary |
+| **Write Combining** | CPU write-combine buffer | 同一 seriesId の APPEND_BAR マージ |
 | **Streaming** | RxJS, Kafka Streams | append-only DataStore + incremental indicator |
 | **Entity Component System** | Unity ECS, Bevy | Series/Indicator を entity として扱う（R5以降） |
 | **Command Pattern** | GPU Command Buffer | RenderSnapshot = frozen command |
