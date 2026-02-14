@@ -107,6 +107,7 @@
 3. **TypeScript ネイティブ**: LWC も TS だが、Mochart は指標定義からテストまで完全 TS ファースト。
 4. **アラート/シグナル統合**: チャートライブラリ本体にアラートランタイムが組み込まれているのはユニーク。
 5. **軽量設計**: embed API + 遅延 import で、SSR フレームワーク (Next.js, SolidStart) との統合が容易。
+6. **Cache-Friendly SoA データ**: AoS Object[] (1 bar ≈ 80B + GC 管理) → SoA Float32Array (1 bar = 24B 連続メモリ)。L1 キャッシュライン (64B) に 16 float が乗るため、price scan / min-max / LTTB が SIMD auto-vectorize される。100万本データでもワーキングセットが L2 (数MB) に収まり、ライバル対比でメモリ消費 ~70% 減。バンドルも < 50KB gzip (core) を目標とし、TradingView LWC (~45KB) と同等以下を狙う。
 
 ---
 

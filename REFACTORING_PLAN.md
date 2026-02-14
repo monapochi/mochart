@@ -69,6 +69,7 @@
 | **Streaming / Incremental** | 全量コピー・全量再計算 | append-only + incremental indicator |
 | **Interface Segregation** | 具象クラス直参照 | trait (interface) 経由のみ |
 | **Zero-copy** | slice/spread コピー多数 | TypedArray view + offset 参照 |
+| **Cache-Friendly Footprint** | AoS Object[] (ポインタ追跡多発、L1/L2 ミス) | SoA TypedArray (連続メモリ、SIMD レーン充填)。ホットパス上のアロケーション 0。バンドル < 50 KB gzip 目標 |
 
 ### 2.2 ターゲット構造
 
@@ -529,45 +530,496 @@ interface ChartRenderer {
 
 ---
 
-## 4. 最終アーキテクチャ
+## 4. 最終アーキテクチャ（R6 完了後の姿）
+
+本セクションは「リファクタ完了時にコードがどういう形になるか」の完全な定義である。
+フェーズタスク表（§3）は **ここに到達するための差分** であり、迷ったらここに戻る。
+
+### 4.1 最終ディレクトリ構成
 
 ```
-User Code
-─────────
-  const chart = Mochart.createChart(container, { renderer: 'auto' })
-  chart.addSeries('candle', { ... })
-  chart.setData(ohlcv)
-  chart.addIndicator('bb', { period: 20 })
+src/
+  index.ts                        ← 公開 re-export のみ (型 + ファクトリ)
+  api/
+    createChart.ts                ← 唯一のファクトリ関数 (旧 createEmbedAPI + MoChart を統合)
+    chartHandle.ts                ← ChartHandle: ユーザーが触る Readonly ハンドル
+    seriesHandle.ts               ← SeriesHandle
+    indicatorHandle.ts            ← IndicatorHandle
+    types.ts                      ← 公開 API の型 (ChartOptions, SeriesOptions, etc.)
+  store/
+    store.ts                      ← ChartStore: dispatch / getState / subscribe
+    state.ts                      ← ChartState 型定義 (Readonly<{viewport, series, ...}>)
+    actions.ts                    ← Action union type
+    reducer.ts                    ← reduce(state, action) 純粋関数
+    selectors.ts                  ← 導出値 (visibleData, priceRange, layoutMetrics)
+  scheduler/
+    scheduler.ts                  ← RenderScheduler: rAF batch + dirty flag
+    actionQueue.ts                ← coalesce() ロジック
+    perfMonitor.ts                ← performance.mark/measure 計測基盤
+  data/
+    columnarStore.ts              ← ColumnarOHLCV (SoA TypedArray)
+    ringBuffer.ts                 ← TickRingBuffer (リアルタイム tick 受信)
+    downsample.ts                 ← LTTB / Min-Max ダウンサンプリング
+    prefetcher.ts                 ← 予測的先読み
+    backpressure.ts               ← FrameAlignedSampler
+  indicators/
+    registry.ts                   ← IndicatorRegistry (現 indicators.ts)
+    catalog.ts                    ← フェーズ別インジケータ登録 (現 indicatorCatalog.ts)
+    definitions/
+      phase1.ts                   ← SMA, EMA, BB, Volume, Pivot (既存)
+      phase2.ts                   ← RSI, MACD, ATR, TradeMarkers (既存)
+      phase3.ts                   ← VWAP, BBWidth, %B, VolRatio (既存)
+      phase4.ts                   ← OBV, MFI, CMF, Divergence, Squeeze (既存)
+    types.ts                      ← IndicatorDefinition, IndicatorResult, etc. (現 indicatorTypes.ts)
+  renderer/
+    types.ts                      ← RenderSnapshot, ChartRenderer interface, HitResult, OverlayCommand
+    factory.ts                    ← createRenderer(backend, canvas): ChartRenderer
+    canvas/
+      canvasRenderer.ts           ← Canvas2D 実装 (implements ChartRenderer)
+      layerManager.ts             ← 4層 OffscreenCanvas 合成 (T1)
+      damageTracker.ts            ← Dirty Rectangle (T5)
+    webgl2/
+      webgl2Renderer.ts           ← WebGL2 実装 (implements ChartRenderer)
+    webgpu/
+      webgpuRenderer.ts           ← WebGPU 実装 + instanced draw (T3)
+      shaders/
+        candle_instanced.wgsl     ← インスタンス描画シェーダ
+        compute_prepass.wgsl      ← GPU compute price range + 頂点生成 (T6)
+    worker/
+      renderWorker.ts             ← OffscreenCanvas Worker (T2, opt-in)
+      protocol.ts                 ← Main↔Worker メッセージ型
+  interaction/
+    eventBridge.ts                ← DOM イベント → Action 変換 (旧 embedApi のイベント部分)
+    tooltip.ts                    ← ツールチップ UI
+    legend.ts                     ← 凡例 UI
+    crosshair.ts                  ← クロスヘア (OverlayCommand 生成)
+  wasm/                           ← (opt-in, R5 以降)
+    simdBridge.ts                 ← WASM SIMD ローダー + TS フォールバック分岐
+    pkg/                          ← wasm-pack 出力 (.wasm + JS glue)
+  i18n.ts                         ← 国際化 (既存)
+  tradeMarkers.ts                 ← TradeMarker 型 + デフォルトスタイル (既存)
 
-Internal Flow
-─────────────
-  ┌─────────┐    Action    ┌───────────┐    dirty    ┌───────────┐
-  │ Public   │ ──────────► │ ChartStore │ ─────────► │ Render    │
-  │ API      │             │ (reducer)  │            │ Scheduler │
-  │ (Handle) │ ◄────────── │            │            │ (rAF)     │
-  └─────────┘  subscribe   └───────────┘            └─────┬─────┘
-                                                          │
-                    ┌─────────────────────────────────────┘
-                    │  frozen RenderSnapshot
-                    ▼
-              ┌───────────┐
-              │ Renderer  │  stateless
-              │ (Canvas/  │  render(snapshot) → pixels
-              │  WebGL2/  │  hitTest(x,y,snapshot) → result
-              │  WebGPU)  │
-              └───────────┘
+crates/                           ← (opt-in, R5 以降)
+  mochart-wasm/
+    Cargo.toml
+    src/
+      lib.rs
+      indicators.rs               ← SMA/EMA/BB/RSI/MACD/ATR SIMD カーネル
+      scan.rs                     ← min_max, LTTB
+
+test/
+  store/
+    reducer.test.ts               ← reduce() の純粋関数テスト
+    selectors.test.ts
+  scheduler/
+    coalesce.test.ts
+    scheduler.test.ts
+  renderer/
+    snapshot.test.ts
+  data/
+    columnar.test.ts
+    downsample.test.ts
+  indicators/
+    indicators.test.ts            ← 既存
+  api/
+    embedApi.test.ts              ← 既存 → createChart.test.ts にリネーム
+  bench/
+    render.bench.ts               ← 描画パイプラインベンチ (SIMD/Worker 判定用)
+    indicator.bench.ts            ← インジケータ計算ベンチ
 ```
 
-### 依存関係ルール
+### 4.2 現ファイル → 最終ファイル 対応表
+
+| 現在のファイル | 最終的な行き先 | 変更内容 |
+|--------------|-------------|---------|
+| `src/index.ts` | `src/index.ts` | re-export のみに縮小。`createChart` を公開 |
+| `src/core/chart.ts` ChartCore | **削除** | → `store/reducer.ts` (状態ロジック) + `api/chartHandle.ts` (公開 API) |
+| `src/core/chart.ts` MoChart | **削除** | → R5 で `createChart` に統合後、削除 |
+| `src/core/embedApi.ts` | **削除** | → `api/createChart.ts` (ファクトリ) + `interaction/eventBridge.ts` (DOM) + `interaction/tooltip.ts` |
+| `src/core/types.ts` | `src/api/types.ts` + `src/store/state.ts` | 公開型と内部型を分離 |
+| `src/core/indicatorTypes.ts` | `src/indicators/types.ts` | 移動のみ |
+| `src/core/indicators.ts` | `src/indicators/registry.ts` | 移動のみ |
+| `src/core/indicatorCatalog.ts` | `src/indicators/catalog.ts` | 移動のみ |
+| `src/core/i18n.ts` | `src/i18n.ts` | 移動のみ |
+| `src/core/tradeMarkers.ts` | `src/tradeMarkers.ts` | 移動のみ |
+| `src/renderer/renderer.ts` | `src/renderer/types.ts` | `RenderSnapshot` + `ChartRenderer` を完全定義 |
+| `src/renderer/canvas/canvasRenderer.ts` | 同パス | `ChartRenderer` 準拠に書き換え |
+| `src/renderer/webgl2/webgl2Renderer.ts` | 同パス | `ChartRenderer` 準拠に書き換え |
+| `src/renderer/webgpu/webgpuRenderer.ts` | 同パス | `ChartRenderer` 準拠 + instanced draw |
+| `src/indicators/phase{1-4}.ts` | `src/indicators/definitions/phase{1-4}.ts` | 移動のみ |
+| `src/demo/` | `src/demo/` | `createChart()` 呼び出しに更新 |
+
+### 4.3 レイヤー構造と依存方向
 
 ```
-Public API  →  ChartStore  →  (nothing)
-Public API  →  RenderScheduler  →  ChartStore (read-only), Renderer
-Renderer    →  (nothing. snapshot を受け取るだけ)
-Indicators  →  DataStore (read-only)
+┌─────────────────────────────────────────────────────────────────────┐
+│                        src/index.ts                                  │
+│           createChart(), 型の re-export のみ                          │
+└──────┬────────────────────────────────────────────────────┬─────────┘
+       │                                                    │
+       ▼                                                    ▼
+┌──────────────┐                                    ┌──────────────────┐
+│  api/        │                                    │  indicators/     │
+│              │                                    │                  │
+│ createChart()│─── new ──► ChartStore              │ registry.ts      │
+│ ChartHandle  │─── new ──► RenderScheduler         │ definitions/     │
+│ SeriesHandle │─── new ──► EventBridge             │ (pure functions) │
+│              │─── new ──► createRenderer()        │                  │
+└──────┬───────┘                                    └────────┬─────────┘
+       │ dispatch(Action)                                    │ calculate(data, params)
+       ▼                                                     │
+┌──────────────┐    subscribe     ┌──────────────────┐       │
+│  store/      │◄────────────────│  scheduler/       │       │
+│              │                  │                   │       │
+│ ChartStore   │─ getState() ──►│ RenderScheduler   │       │
+│ reduce()     │                  │ coalesce()        │       │
+│              │                  │ perfMonitor       │       │
+└──────┬───────┘                  └────────┬──────────┘       │
+       │ state.series.data                 │ snapshot         │
+       ▼                                   ▼                  ▼
+┌──────────────┐                  ┌──────────────────┐┌──────────────┐
+│  data/       │                  │  renderer/       ││  wasm/       │
+│              │                  │                  ││  (opt-in)    │
+│ ColumnarOHLCV│ ◄── subarray ── │ ChartRenderer    ││ simdBridge   │
+│ RingBuffer   │    (zero-copy)  │ ├ Canvas         ││ SIMD kernels │
+│ downsample   │                  │ ├ WebGL2        │└──────────────┘
+│ prefetcher   │                  │ ├ WebGPU        │
+│ backpressure │                  │ └ Worker(opt-in)│
+└──────────────┘                  └──────────────────┘
+                                         ▲
+                                         │ OverlayCommand[]
+                                  ┌──────┴──────────┐
+                                  │  interaction/   │
+                                  │                 │
+                                  │ eventBridge     │  DOM → Action
+                                  │ tooltip         │  HitResult → HTML
+                                  │ legend          │  state → HTML
+                                  │ crosshair       │  → OverlayCommand
+                                  └─────────────────┘
 ```
 
-**循環依存 = 0**。どの層も下の層だけに依存する。
+**依存方向ルール（厳守）**:
+
+```
+api/           → store/, scheduler/, renderer/, interaction/   (上から下のみ)
+store/         → (何にも依存しない。純粋な state + reducer)
+scheduler/     → store/ (read-only)
+renderer/      → (何にも依存しない。snapshot を受け取るだけ)
+data/          → (何にも依存しない。TypedArray 操作のみ)
+interaction/   → (何にも依存しない。DOM → Action 変換のみ)
+indicators/    → data/ (read-only)
+wasm/          → (何にも依存しない。計算カーネルのみ)
+```
+
+**循環依存 = 0**。すべての矢印は上から下、または左から右。
+
+### 4.4 コア型定義（最終形）
+
+#### 4.4.1 状態 (store/state.ts)
+
+```typescript
+export type ChartState = Readonly<{
+  viewport: Readonly<{
+    startIndex: number;         // fractional OK (smooth scroll)
+    visibleCount: number;
+    rightMarginBars: number;
+  }>;
+  series: ReadonlyMap<string, Readonly<{
+    config: SeriesConfig;
+    dataRef: ColumnarRef;       // ColumnarOHLCV への参照 (コピーなし)
+  }>>;
+  indicators: readonly IndicatorInstance[];
+  layout: Readonly<{
+    width: number;
+    height: number;
+    dpr: number;
+  }>;
+  interaction: Readonly<{
+    hover: { x: number; y: number } | null;
+    drag: { active: boolean; startX: number; startIndex: number } | null;
+    pinch: { startDist: number; lastDist: number; centerIndex: number } | null;
+  }>;
+}>;
+
+// ColumnarOHLCV への参照。データ本体は data/columnarStore に存在し、
+// state にはポインタだけ持つ (structural sharing)
+//
+// メモリバジェット (SoA Float32Array, 6 ch × 4B = 24B/bar):
+//   1,000 bars (1画面)   →  24 KB   — L1 キャッシュに収まる (通常 32-48 KB)
+//   10,000 bars           → 240 KB   — L2 に収まる
+//   1,000,000 bars (10年) →  24 MB   — L3 に収まる (通常 6-32 MB)
+//
+// 比較: 現 AoS Object[] は 1 bar ≈ 80B → 同データで 80 MB + GC 圧力
+export type ColumnarRef = Readonly<{
+  storeId: string;
+  length: number;
+  version: number;     // append ごとに increment → selector の equality check に使用
+}>;
+```
+
+#### 4.4.2 アクション (store/actions.ts)
+
+```typescript
+export type Action =
+  | { type: 'PAN'; deltaBars: number }
+  | { type: 'ZOOM'; factor: number; centerIndex?: number; centerRatio?: number }
+  | { type: 'SET_VIEWPORT'; from: number; to: number }
+  | { type: 'SET_DATA'; seriesId: string; version: number }
+  | { type: 'APPEND_BAR'; seriesId: string; version: number }
+  | { type: 'ADD_SERIES'; seriesId: string; config: SeriesConfig }
+  | { type: 'REMOVE_SERIES'; seriesId: string }
+  | { type: 'ADD_INDICATOR'; instance: IndicatorInstance }
+  | { type: 'REMOVE_INDICATOR'; instanceId: string }
+  | { type: 'RESIZE'; width: number; height: number; dpr: number }
+  | { type: 'HOVER'; x: number; y: number }
+  | { type: 'HOVER_LEAVE' }
+  | { type: 'DRAG_START'; x: number }
+  | { type: 'DRAG_MOVE'; x: number }
+  | { type: 'DRAG_END' }
+  | { type: 'PINCH_START'; dist: number; centerIndex: number }
+  | { type: 'PINCH_MOVE'; dist: number }
+  | { type: 'PINCH_END' };
+```
+
+#### 4.4.3 レンダースナップショット (renderer/types.ts)
+
+```typescript
+export type RenderSnapshot = Readonly<{
+  viewport: ChartState['viewport'];
+  layout: ChartState['layout'];
+
+  // --- Selector が事前計算した導出値 ---
+  visibleData: ColumnarSlice;         // subarray view (ゼロコピー)
+  priceRange: { yMin: number; yMax: number };
+  layoutMetrics: LayoutMetrics;       // plotX/Y/W/H, stepX, candleW
+  indicators: readonly IndicatorOutput[];
+  overlays: readonly OverlayCommand[];  // crosshair, tooltip range, alerts
+  seriesConfigs: ReadonlyMap<string, SeriesConfig>;
+}>;
+
+export type ColumnarSlice = Readonly<{
+  time:   Float64Array;   // subarray view — コピーなし
+  open:   Float32Array;
+  high:   Float32Array;
+  low:    Float32Array;
+  close:  Float32Array;
+  volume: Float32Array;
+  length: number;
+  globalOffset: number;   // 元データ上での開始 index
+}>;
+
+export type LayoutMetrics = Readonly<{
+  plotX: number; plotY: number;
+  plotW: number; plotH: number;
+  stepX: number; candleW: number;
+  startIndex: number; startIndexRaw: number;
+  visibleCount: number;
+  yMin: number; yMax: number;
+  rightMarginBars: number;
+}>;
+
+export type OverlayCommand =
+  | { type: 'crosshair'; x: number; y: number; price: number; time: number }
+  | { type: 'tooltip'; x: number; y: number; html: string }
+  | { type: 'alert'; rect: DamageRect; color: string };
+
+export type HitResult = {
+  seriesId: string;
+  index: number;
+  point: { time: number; open: number; high: number; low: number; close: number; volume: number };
+  x: number;
+  y: number;
+  priceAtY: number;
+};
+```
+
+#### 4.4.4 レンダラーインターフェース (renderer/types.ts)
+
+```typescript
+export interface ChartRenderer {
+  /** スナップショットから1フレーム描画 */
+  render(snapshot: RenderSnapshot): void;
+
+  /** オーバーレイ層のみ再描画 (crosshair, tooltip) */
+  renderOverlay(snapshot: RenderSnapshot): void;
+
+  /** クリック / ホバー対象の candle を特定 */
+  hitTest(x: number, y: number, snapshot: RenderSnapshot): HitResult | null;
+
+  /** キャンバスリサイズ */
+  resize(width: number, height: number, dpr: number): void;
+
+  /** リソース解放 */
+  destroy(): void;
+}
+```
+
+### 4.5 公開 API（最終形）
+
+```typescript
+// src/index.ts から export される唯一のファクトリ
+export function createChart(
+  container: HTMLElement,
+  options?: ChartOptions,
+): ChartHandle;
+
+// --- ChartHandle: ユーザーが操作する唯一のオブジェクト ---
+export interface ChartHandle {
+  // --- Series ---
+  addSeries(config: SeriesConfig): SeriesHandle;
+  removeSeries(id: string): void;
+
+  // --- Data ---
+  setData(seriesId: string, data: OhlcvPoint[]): void;
+  appendBar(seriesId: string, bar: OhlcvPoint): void;
+
+  // --- Viewport ---
+  panBy(deltaBars: number): void;
+  zoomAt(factor: number, centerIndex?: number): void;
+  setViewport(from: number, to: number): void;
+  getVisibleRange(): { from: number; to: number };
+
+  // --- Indicators ---
+  addIndicator(id: string, params?: Record<string, unknown>): IndicatorHandle;
+  removeIndicator(instanceId: string): void;
+
+  // --- Batch ---
+  batch(fn: () => void): void;
+
+  // --- Events ---
+  on<K extends keyof ChartEvents>(event: K, handler: ChartEvents[K]): void;
+  off<K extends keyof ChartEvents>(event: K, handler?: ChartEvents[K]): void;
+
+  // --- Lifecycle ---
+  resize(): void;
+  destroy(): void;
+}
+
+export interface ChartOptions {
+  width?: number;
+  height?: number;
+  locale?: string;
+  theme?: 'light' | 'dark';
+  renderer?: 'auto' | 'canvas' | 'webgl2' | 'webgpu' | 'canvas-worker';
+  defaultVisibleDays?: number;
+  rightMarginDays?: number;
+  enableTooltip?: boolean;
+  enableCrosshair?: boolean;
+  showLegend?: boolean;
+  tooltipFormatter?: (point: OhlcvPoint, index: number) => string;
+}
+
+export interface ChartEvents {
+  rangeChanged: (range: { from: number; to: number }) => void;
+  click: (hit: HitResult | null) => void;
+  hover: (hit: HitResult | null) => void;
+}
+```
+
+### 4.6 データフロー（具体例: ユーザーがトラックパッドで pan）
+
+```
+1. EventBridge.onWheel(ev)
+   │  DOM WheelEvent を受け取り、pixel → bars 変換
+   │  ev.getCoalescedEvents() で 120Hz 入力を統合 (T11)
+   ▼
+2. scheduler.enqueue({ type: 'PAN', deltaBars: 2.3 })
+   │  ActionQueue に push。rAF がまだスケジュールされていなければ requestAnimationFrame()
+   │
+   │  ── 同じフレーム内に zoomAt() が来た場合 ──
+   │  scheduler.enqueue({ type: 'ZOOM', factor: 1.1 })
+   │
+   ▼
+3. rAF fires → scheduler.flush()
+   │
+   │  3a. coalesce([PAN(2.3), PAN(0.7)]) → PAN(3.0)    ← 同種マージ
+   │  3b. for (action of coalesced) { state = reduce(state, action) }
+   │  3c. performance.measure('reduce', ...)             ← R2-8 計測
+   │
+   ▼
+4. store.setState(newState)
+   │  subscribers に通知 (selector で変更検知: viewport が変わった)
+   │
+   ▼
+5. scheduler: snapshot = selectors.buildSnapshot(state, dataStore)
+   │
+   │  5a. visibleData = columnar.sliceView(start, count)  ← subarray, コピーなし (T7)
+   │  5b. priceRange = columnar.priceRange(start, count)   ← SIMD 自動ベクトル化 or WASM (T15)
+   │  5c. indicators = registry.computeIncremental(...)     ← O(1) or time-sliced (T14)
+   │  5d. layoutMetrics = computeLayout(viewport, layout, priceRange)
+   │  5e. overlays = interaction.hover → crosshairCommand
+   │  5f. Object.freeze(snapshot)
+   │
+   ▼
+6. renderer.render(snapshot)
+   │
+   │  Canvas2D path:
+   │    6a. damageTracker.computeDamage(prev, snapshot)    ← T5
+   │    6b. layerManager.invalidate('candles')             ← T1 (overlay は別レイヤー)
+   │    6c. candles 層だけ再描画、static 層はスキップ
+   │    6d. layerManager.composite()                       ← 全レイヤー合成
+   │
+   │  WebGPU path:
+   │    6a. device.queue.writeBuffer(instanceBuffer, ohlcData)  ← instanced draw (T3)
+   │    6b. pass.draw(6, visibleCount)                           ← 1 draw call
+   │
+   │  performance.measure('render', ...)
+   │
+   ▼
+7. renderer.renderOverlay(snapshot)
+   │  crosshair / tooltip を overlay 層に描画 (candles 再描画なし)
+   │
+   ▼
+8. 画面に反映。次の rAF まで idle。
+```
+
+### 4.7 依存関係ルール（厳守）
+
+```
+api/           → store/, scheduler/, renderer/factory, interaction/, indicators/registry
+store/         → (nothing — 純粋な state + reducer、DOM もブラウザ API も参照しない)
+scheduler/     → store/ (read-only getState)
+renderer/      → (nothing — snapshot を受け取り pixels を返すだけ)
+data/          → (nothing — TypedArray 操作のみ)
+interaction/   → (nothing — DOM event → Action record 変換のみ)
+indicators/    → data/ (read-only)
+wasm/          → (nothing — 計算カーネルのみ)
+```
+
+**ルール**: 同レイヤー間の import 禁止。下層から上層への import 禁止。`import type` は例外的に許可（型のみ）。
+
+### 4.8 現コード → 最終コード 移行の大きな流れ
+
+```
+Phase   何が起きるか                                  消えるもの
+─────   ──────────────────────────────────────────   ──────────────
+R0      ChartCore に public accessor 追加            (as any) 12箇所
+        EmbedAPI が public API 経由に
+        CanvasRenderer が ViewportRenderer 準拠
+
+R1      store/ 新設                                  ChartCore の mutable fields
+        reduce() に viewport 計算を抽出               panBy/zoomAt 内の直接 state 変更
+        ChartCore.panBy() → store.dispatch() ラッパー
+
+R2      scheduler/ 新設                              drawSeries() 即時呼び出し全7箇所
+        全 panBy/zoomAt/setData が enqueue() 経由に    同期描画パス
+        interaction/eventBridge.ts 新設               EmbedAPI の DOM イベント部分
+
+R3      renderer/types.ts に RenderSnapshot 定義      CanvasRenderer の viewport state
+        CanvasRenderer → render(snapshot) 書き換え     drawSeries(id, data, opts) シグネチャ
+        layerManager + damageTracker 新設
+
+R4      data/ 新設                                    AoS Object[] データ
+        ColumnarOHLCV + RingBuffer                     data.slice() 毎フレームコピー
+        IndicatorDefinition.update() 活用              O(n) fullrecalc パス
+
+R5      wasm/ 新設 + crates/                          MoChart クラス全体
+        WebGPU instanced draw                          ChartCore (残骸)
+        api/createChart.ts が唯一のエントリ             createEmbedAPI()
+
+R6      renderer/worker/ 新設                          (追加のみ、削除なし)
+        SharedArrayBuffer 対応                         main-thread 描画は残す (フォールバック)
+```
 
 ---
 
@@ -575,27 +1027,29 @@ Indicators  →  DataStore (read-only)
 
 | 観点 | Before (現状) | After (目標) | 適用技法 |
 |------|--------------|-------------|---------|
-| **状態管理** | mutable fields scattered | Immutable store + pure reducer | — |
-| **描画タイミング** | 即時・複数回/frame | rAF batch, 1回/frame | §2.4 |
-| **リクエスト結合** | 各操作が独立に描画 | Action coalesce + batch() API | §2.4 |
-| **描画範囲** | 毎回全面再描画 | Multi-layer compositing + dirty rect | T1, T5 |
-| **描画スレッド** | main thread のみ | OffscreenCanvas + Worker (opt-in) | T2, T9 |
-| **Draw calls** | N candles × 2-3 calls each | 1 instanced draw call | T3 |
-| **大量データ表示** | 全 candle を処理 | LTTB downsampling | T4 |
-| **GPU 活用** | 頂点生成は CPU のみ | Compute pre-pass on GPU | T6 |
-| **データ構造** | AoS (Object[]) | SoA Columnar TypedArray | T7 |
-| **データ更新** | 全量 slice コピー | append-only, zero-copy subarray | T7 |
-| **リアルタイム tick** | 毎 tick drawSeries | Ring buffer + backpressure | T8, T12 |
-| **インジケータ更新** | O(n) full recalc | O(1) incremental + time-sliced | T14 |
-| **CPU ベクトル演算** | V8 scalar (auto-vec 不確実) | WASM SIMD 4-wide 確実ベクトル化 | T15 |
-| **入力精度** | 60Hz PointerEvent | getCoalescedEvents() 120-240Hz | T11 |
-| **先読み** | なし (表示範囲のみ) | 予測的 prefetch (pan velocity) | T10 |
-| **ワイヤフォーマット** | JSON parse | FlatBuffers zero-copy (opt-in) | T13 |
-| **レイヤー結合** | API→Core→Renderer 透過 (as any) | strict interface boundary | — |
-| **Renderer 切替** | 不可能 (concrete 直結) | Factory, runtime switchable | — |
-| **テスタビリティ** | 困難 (DOM + mutable state) | reducer は pure func でテスト可 | — |
-| **Undo/Redo** | 不可能 | state history で可能 | — |
-| **SSR 安全性** | DOM 依存が Core に混入 | Store は純粋 JS、DOM は API 層のみ | — |
+| **状態管理** | mutable fields scattered | Immutable store + pure reducer | R1 |
+| **描画タイミング** | 即時・複数回/frame | rAF batch, 1回/frame | R2 §2.4 |
+| **リクエスト結合** | 各操作が独立に描画 | Action coalesce + batch() API | R2 §2.4 |
+| **描画範囲** | 毎回全面再描画 | Multi-layer compositing + dirty rect | R3 T1,T5 |
+| **描画スレッド** | main thread のみ | OffscreenCanvas + Worker (opt-in) | R6 T2,T9 |
+| **Draw calls** | N candles × 2-3 calls each | 1 instanced draw call | R5 T3 |
+| **大量データ表示** | 全 candle を処理 | LTTB downsampling | R3 T4 |
+| **GPU 活用** | 頂点生成は CPU のみ | Compute pre-pass on GPU | R5 T6 |
+| **データ構造** | AoS (Object[]) | SoA Columnar TypedArray | R4 T7 |
+| **データ更新** | 全量 slice コピー | append-only, zero-copy subarray | R4 T7 |
+| **リアルタイム tick** | 毎 tick drawSeries | Ring buffer + backpressure | R4 T8,T12 |
+| **インジケータ更新** | O(n) full recalc | O(1) incremental + time-sliced | R4 T14 |
+| **CPU ベクトル演算** | V8 scalar (auto-vec 不確実) | WASM SIMD 4-wide 確実ベクトル化 | R5 T15 |
+| **入力精度** | 60Hz PointerEvent | getCoalescedEvents() 120-240Hz | R2 T11 |
+| **先読み** | なし | 予測的 prefetch (pan velocity) | R4 T10 |
+| **レイヤー結合** | `(core as any)` → private field | strict interface boundary | R0 |
+| **Renderer 切替** | 不可能 (concrete 直結) | `createRenderer('auto')` で runtime 切替 | R3 |
+| **テスタビリティ** | 困難 (DOM + mutable state) | `reduce()` は `bun test` だけで検証可 | R1 |
+| **Undo/Redo** | 不可能 | state history で可能 | R1 |
+| **SSR 安全性** | DOM 依存が Core に混入 | store/ は純粋 JS、DOM は api/ と interaction/ のみ | R1,R2 |
+| **メモリフットプリント** | AoS Object[] (1 bar = 7 prop × 8B + header ≈ 80B) | SoA Float32Array (1 bar = 6×4B = 24B)。同データ量で **~70% 削減** | R4 T7 |
+| **CPU キャッシュ効率** | オブジェクトがヒープに散在、L1/L2 ミス多発 | TypedArray = 連続アドレス。price scan は L1 に乗る (64B line × 16 floats) | R4 T7 |
+| **バンドルサイズ** | 未計測 (推定 ~80KB gzip) | < 50 KB gzip (core)。WASM/WebGPU は遅延 import | R5 |
 
 ---
 
@@ -603,13 +1057,15 @@ Indicators  →  DataStore (read-only)
 
 ```
 R0 (地ならし)         ███░░░░░░░░░░░░░  密結合の解消
-R1 (Immutable Store)  ░░░███░░░░░░░░░░  Reducer パターン導入
-R2 (Scheduler+Input)  ░░░░░░██░░░░░░░░  rAF batch + T11 coalesced events + T14 time-slice
-R3 (Renderer+Layer)   ░░░░░░░░███░░░░░  Stateless + T1 layers + T4 LOD + T5 dirty rect
-R4 (Stream+Columnar)  ░░░░░░░░░░░██░░░  T7 columnar + T8 ring + T10 prefetch + T12 backpressure
-R5 (GPU+SIMD統合)     ░░░░░░░░░░░░░██░  T3 instanced + T6 compute + T15 WASM SIMD + MoChart統合
-R6 (Worker)           ░░░░░░░░░░░░░░░█  T2 OffscreenCanvas + T9 SharedArrayBuffer (opt-in)
+R1 (Immutable Store)  ░░░███░░░░░░░░░░  store/ 新設 → reduce パターン導入
+R2 (Scheduler+Input)  ░░░░░░██░░░░░░░░  scheduler/ + interaction/ 新設 → rAF batch
+R3 (Renderer+Layer)   ░░░░░░░░███░░░░░  renderer/ 書き換え → Stateless + T1 layers + T4 LOD + T5 dirty rect
+R4 (Stream+Columnar)  ░░░░░░░░░░░██░░░  data/ 新設 → T7 columnar + T8 ring + T10 prefetch + T12 backpressure
+R5 (GPU+SIMD統合)     ░░░░░░░░░░░░░██░  wasm/ + api/createChart → T3 instanced + T6 compute + T15 SIMD
+R6 (Worker)           ░░░░░░░░░░░░░░░█  renderer/worker/ 新設 → T2 OffscreenCanvas + T9 SharedArrayBuffer (opt-in)
 ```
+
+各フェーズ完了時に **全テスト通過 + デモ動作確認** を gate とする。
 
 各フェーズ完了時に全テスト通過 + デモ動作確認を gate とする。
 
