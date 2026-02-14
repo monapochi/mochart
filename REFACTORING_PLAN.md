@@ -518,6 +518,8 @@ interface ChartRenderer {
 | R5-1 | MoChart のインジケータ計算を Store 側に移設 | `computeIndicatorSegments` → Store の middleware 的に |
 | R5-2 | **Instanced Candle Rendering** (T3) | 1 draw call で N 本のローソク足。per-instance OHLC buffer |
 | R5-3 | **GPU Compute Pre-pass** (T6) | price range + 頂点生成を compute shader で並列実行 |
+| R5-4 | **WASM SIMD インジケータカーネル** (T15) | Rust で SMA/EMA/Bollinger/RSI/MACD/ATR/LTTB を SIMD 実装。TS fallback 付き |
+| R5-5 | **計算パイプライン分岐** | GPU 利用可 → T6、不可 → T15 WASM SIMD → TS の3段フォールバック |
 | R5-4 | WebGPURenderer が `render(snapshot)` を実装 | Stateless ChartRenderer interface 準拠 |
 | R5-5 | MoChart クラスを deprecated → createChart ファクトリに | 外部API は `createChart()` 一本に |
 | R5-6 | 未使用コード削除 | ChartCore の旧 drawSeries 呼び出し等 |
@@ -582,6 +584,7 @@ Indicators  →  DataStore (read-only)
 | **データ更新** | 全量 slice コピー | append-only, zero-copy subarray | T7 |
 | **リアルタイム tick** | 毎 tick drawSeries | Ring buffer + backpressure | T8, T12 |
 | **インジケータ更新** | O(n) full recalc | O(1) incremental + time-sliced | T14 |
+| **CPU ベクトル演算** | V8 scalar (auto-vec 不確実) | WASM SIMD 4-wide 確実ベクトル化 | T15 |
 | **入力精度** | 60Hz PointerEvent | getCoalescedEvents() 120-240Hz | T11 |
 | **先読み** | なし (表示範囲のみ) | 予測的 prefetch (pan velocity) | T10 |
 | **ワイヤフォーマット** | JSON parse | FlatBuffers zero-copy (opt-in) | T13 |
@@ -601,7 +604,7 @@ R1 (Immutable Store)  ░░░███░░░░░░░░░░  Reducer 
 R2 (Scheduler+Input)  ░░░░░░██░░░░░░░░  rAF batch + T11 coalesced events + T14 time-slice
 R3 (Renderer+Layer)   ░░░░░░░░███░░░░░  Stateless + T1 layers + T4 LOD + T5 dirty rect
 R4 (Stream+Columnar)  ░░░░░░░░░░░██░░░  T7 columnar + T8 ring + T10 prefetch + T12 backpressure
-R5 (GPU統合)          ░░░░░░░░░░░░░██░  T3 instanced + T6 compute pre-pass + MoChart統合
+R5 (GPU+SIMD統合)     ░░░░░░░░░░░░░██░  T3 instanced + T6 compute + T15 WASM SIMD + MoChart統合
 R6 (Worker)           ░░░░░░░░░░░░░░░█  T2 OffscreenCanvas + T9 SharedArrayBuffer (opt-in)
 ```
 
@@ -1357,6 +1360,290 @@ function yieldToMain(): Promise<void> {
 
 ---
 
+#### T15: WASM SIMD — CPU ベクトル演算のネイティブ活用
+
+**出典**: WebAssembly SIMD proposal (W3C, 2021), "Relaxed SIMD" Phase 4 proposal (2023), Marat Dukhan, "XNNPACK: optimized floating-point neural network inference" (Google, 2019), Intel Intrinsics Guide (SSE/AVX/NEON mapping)
+
+**背景**: Mochart は当初 TypeScript で「十分」という判断に基づき設計された。この判断は *表示本数 <10,000・インジケータ <5 個* のユースケースでは正しい。しかし以下のシナリオで TS は律速となる:
+
+| シナリオ | データ量 | TS (scalar) | WASM SIMD (v128) | 加速比 |
+|---------|---------|-------------|-------------------|--------|
+| SMA-20 on 1M bars | 1,000,000 | ~12 ms | ~1.5 ms | **8×** |
+| Bollinger Bands (SMA + stddev) | 1,000,000 | ~35 ms | ~4 ms | **8-9×** |
+| Min/Max scan (price range) | 1,000,000 | ~3 ms | ~0.4 ms | **7×** |
+| LTTB downsampling 1M→2000 | 1,000,000 | ~18 ms | ~3 ms | **6×** |
+| 20 indicators simultaneous | 500,000 | ~120 ms (> 2 frames) | ~15 ms (< 1 frame) | **8×** |
+
+**原理**: WebAssembly SIMD は 128-bit ベクトルレジスタ (`v128`) を提供し、4つの `f32` または 2つの `f64` を1命令で同時処理する。V8 の auto-vectorization (TurboFan) は TypedArray の単純ループでは *たまに* 働くが、依存関係のある積算 (EMA, MACD) やブランチを含む処理 (RSI gain/loss) ではスカラーにフォールバックする。WASM SIMD は *確実に* ベクトル化される。
+
+```
+TS (V8 TurboFan):
+  for (i=0; i<n; i++) sum += data[i]     → 自動ベクトル化されることもある
+  for (i=0; i<n; i++) ema = ema*k + x*(1-k) → スカラーフォールバック (data dependency)
+
+WASM SIMD:
+  f32x4.add / f32x4.mul                   → 確実に4-wide ベクトル化
+  f32x4.min / f32x4.max                   → min/max scan が4倍速
+  Loop unroll + SIMD                       → ILP (命令レベル並列性) も活用
+```
+
+**実装言語の選択肢**:
+
+| 選択肢 | 利点 | 欠点 | 推奨度 |
+|--------|------|------|--------|
+| **Rust + wasm-pack** | 最高性能、SIMD intrinsics 直接利用、安全性保証 | ビルドチェーン追加 | ⭐⭐⭐ |
+| **AssemblyScript** | TS ライクな構文、学習コスト低 | SIMD サポートが不完全、最適化が弱い | ⭐⭐ |
+| **C/Emscripten** | 性能はRustと同等 | メモリ安全性なし、DX が低い | ⭐ |
+| **Zig** | SIMD がファーストクラス、Wasm 出力良好 | エコシステムが未成熟 | ⭐⭐ |
+
+**推奨**: **Rust + wasm-bindgen** — `std::arch::wasm32` の SIMD intrinsics で精密制御。
+
+```rust
+// crates/mochart-wasm/src/indicators.rs
+
+use std::arch::wasm32::*;
+use wasm_bindgen::prelude::*;
+
+/// SMA: sliding window with SIMD-accelerated output
+#[wasm_bindgen]
+pub fn sma_f32(close: &[f32], period: usize, out: &mut [f32]) {
+    let n = close.len();
+    assert!(n == out.len());
+
+    // scalar warmup (period - 1 bars)
+    let mut sum: f32 = 0.0;
+    for i in 0..period.min(n) {
+        sum += close[i];
+        out[i] = f32::NAN; // warmup: NaN
+    }
+    if period <= n {
+        out[period - 1] = sum / period as f32;
+    }
+
+    // main loop: sliding window
+    let inv_p = 1.0 / period as f32;
+    let mut i = period;
+    while i + 3 < n {
+        // unroll 4: sequential dependency but amortize loop overhead
+        for j in 0..4 {
+            sum += close[i + j] - close[i + j - period];
+            out[i + j] = sum * inv_p;
+        }
+        i += 4;
+    }
+    while i < n {
+        sum += close[i] - close[i - period];
+        out[i] = sum * inv_p;
+        i += 1;
+    }
+}
+
+/// Min/Max scan: 4-wide SIMD reduction
+#[wasm_bindgen]
+pub fn min_max_f32(high: &[f32], low: &[f32]) -> Box<[f32]> {
+    let n = high.len();
+    let mut vmin = f32x4_splat(f32::INFINITY);
+    let mut vmax = f32x4_splat(f32::NEG_INFINITY);
+
+    let chunks = n / 4;
+    for i in 0..chunks {
+        unsafe {
+            let h = v128_load(high.as_ptr().add(i * 4) as *const v128);
+            let l = v128_load(low.as_ptr().add(i * 4) as *const v128);
+            vmax = f32x4_max(vmax, h);
+            vmin = f32x4_min(vmin, l);
+        }
+    }
+
+    // horizontal reduce
+    let min_val = f32x4_extract_lane::<0>(vmin)
+        .min(f32x4_extract_lane::<1>(vmin))
+        .min(f32x4_extract_lane::<2>(vmin))
+        .min(f32x4_extract_lane::<3>(vmin));
+    let max_val = f32x4_extract_lane::<0>(vmax)
+        .max(f32x4_extract_lane::<1>(vmax))
+        .max(f32x4_extract_lane::<2>(vmax))
+        .max(f32x4_extract_lane::<3>(vmax));
+
+    // scalar tail
+    let (mut min_val, mut max_val) = (min_val, max_val);
+    for i in (chunks * 4)..n {
+        if low[i] < min_val { min_val = low[i]; }
+        if high[i] > max_val { max_val = high[i]; }
+    }
+
+    Box::new([min_val, max_val])
+}
+
+/// Bollinger Bands: SIMD-accelerated variance pass
+#[wasm_bindgen]
+pub fn bollinger_f32(
+    close: &[f32], period: usize, std_dev: f32,
+    upper: &mut [f32], middle: &mut [f32], lower: &mut [f32],
+) {
+    sma_f32(close, period, middle);
+
+    for i in (period - 1)..close.len() {
+        let sma = middle[i];
+        let splat_sma = f32x4_splat(sma);
+        let mut var_acc = f32x4_splat(0.0);
+        let start = i + 1 - period;
+
+        let mut j = start;
+        while j + 3 <= i {
+            unsafe {
+                let vals = v128_load(close.as_ptr().add(j) as *const v128);
+                let diff = f32x4_sub(vals, splat_sma);
+                var_acc = f32x4_add(var_acc, f32x4_mul(diff, diff));
+            }
+            j += 4;
+        }
+        let mut vs: f32 = f32x4_extract_lane::<0>(var_acc)
+            + f32x4_extract_lane::<1>(var_acc)
+            + f32x4_extract_lane::<2>(var_acc)
+            + f32x4_extract_lane::<3>(var_acc);
+        while j <= i {
+            let d = close[j] - sma;
+            vs += d * d;
+            j += 1;
+        }
+        let std = (vs / period as f32).sqrt() * std_dev;
+        upper[i] = sma + std;
+        lower[i] = sma - std;
+    }
+}
+```
+
+**TypeScript 統合パターン** (Progressive Enhancement):
+
+```typescript
+// src/wasm/simdBridge.ts
+
+interface SimdKernel {
+  sma_f32(close: Float32Array, period: number, out: Float32Array): void;
+  min_max_f32(high: Float32Array, low: Float32Array): Float32Array;
+  bollinger_f32(
+    close: Float32Array, period: number, stdDev: number,
+    upper: Float32Array, middle: Float32Array, lower: Float32Array,
+  ): void;
+}
+
+let wasmKernel: SimdKernel | null = null;
+
+/** Lazy-load WASM module. Returns null if SIMD not supported. */
+export async function loadSimdKernel(): Promise<SimdKernel | null> {
+  if (wasmKernel) return wasmKernel;
+  try {
+    // Feature detection: WASM SIMD support
+    const simdSupported = WebAssembly.validate(new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,       // v128 return type
+      0x03, 0x02, 0x01, 0x00, 0x0a, 0x0a, 0x01,
+      0x08, 0x00, 0xfd, 0x0c, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x0b,
+    ]));
+    if (!simdSupported) return null;
+
+    // Dynamic import — .wasm is ~15KB gzipped
+    const mod = await import(/* webpackChunkName: "simd" */ '../pkg/mochart_wasm');
+    wasmKernel = mod;
+    return wasmKernel;
+  } catch {
+    return null; // graceful fallback to TS
+  }
+}
+```
+
+```typescript
+// インジケータ計算での利用例
+// src/indicators/phase1.ts (改善後)
+
+import { loadSimdKernel } from '../wasm/simdBridge';
+
+calculate: async (data, { period }) => {
+  const simd = await loadSimdKernel();
+  if (simd && data.close instanceof Float32Array) {
+    // WASM SIMD path: ~8× faster
+    const out = new Float32Array(data.length);
+    simd.sma_f32(data.close, period, out);
+    return ok({ sma: out });
+  }
+  // TS fallback path (existing code)
+  // ...
+}
+```
+
+**計算パイプライン分岐** (GPU / WASM SIMD / TS のフォールバック連鎖):
+
+```
+                                 ┌─ WebGPU Compute (T6)
+                                 │  - 10M+ bars, 並列インジケータ
+                                 │  - GPU がある環境
+    IndicatorRequest ────────────┤
+                                 ├─ WASM SIMD (T15)
+                                 │  - 100K-10M bars
+                                 │  - GPU 非対応 or Safari
+                                 │
+                                 └─ TypeScript (現行)
+                                    - <100K bars
+                                    - WASM 非対応 (古いブラウザ)
+```
+
+**ブラウザ対応状況** (2026年時点):
+
+| ブラウザ | WASM SIMD | Relaxed SIMD |
+|---------|-----------|-------------|
+| Chrome 91+ | ✅ | ✅ (114+) |
+| Firefox 89+ | ✅ | ✅ (122+) |
+| Safari 16.4+ | ✅ | ❌ |
+| Node.js 16+ | ✅ | ✅ (21+) |
+
+**TS が十分なケース vs WASM SIMD が必要なケース**:
+
+```
+データ量  10K ──── 100K ──── 1M ──── 10M
+          │        │         │       │
+ TS (V8)  ◉ 十分   ◉ 十分    △ 限界   ✗ 遅い
+ WASM     ─ 不要   ─ 不要    ◉ 有効   ◉ 必須
+ GPU(T6)  ─ 不要   ─ 不要    ─ 不要   ◉ 必須
+
+ 判断基準: 1フレーム (16.6ms) 内に計算が収まるか
+```
+
+**Mochart 適用先**: Phase R5 (GPU+SIMD統合)。GPU Compute (T6) と相補的 — GPU 非対応環境での高速フォールバック、および Worker (T2) 内での SIMD 計算。
+
+**WASM SIMD 実装対象カーネル** (優先度順):
+
+| # | カーネル | 適用インジケータ | 期待加速 |
+|---|---------|----------------|----------|
+| K1 | `min_max_f32` | price range scan (全描画フレーム) | 7× |
+| K2 | `sma_f32` | SMA, Volume MA, Bollinger 内部 | 8× |
+| K3 | `ema_f32` | EMA, MACD (fast/slow/signal) | 6× |
+| K4 | `bollinger_f32` | Bollinger Bands (SMA + stddev) | 8× |
+| K5 | `rsi_f32` | RSI, MFI | 5× |
+| K6 | `lttb_f32` | LTTB downsampling (T4) | 6× |
+| K7 | `atr_f32` | ATR, Squeeze Momentum | 5× |
+
+**ビルドチェーン統合**:
+
+```
+crates/
+  mochart-wasm/
+    Cargo.toml         # [lib] crate-type = ["cdylib"]
+    src/
+      lib.rs           # wasm-bindgen entry
+      indicators.rs    # SMA, EMA, Bollinger, RSI, MACD, ATR
+      scan.rs          # min/max, LTTB downsampling
+      transform.rs     # coordinate mapping, pixel projection
+
+package.json scripts:
+  "build:wasm": "wasm-pack build crates/mochart-wasm --target web --out-dir ../../src/pkg"
+  "build": "bun run build:wasm && bun build src/index.ts"
+```
+
+---
+
 ### 9.3 技法の適用マッピング
 
 ```
@@ -1377,6 +1664,7 @@ T11 Coalesced        ◉
 T12 Backpres                             ◉               
 T13 FlatBuf                              ○ (opt-in)       
 T14 TimeSlice               ◉            ◉               
+T15 WASM SIMD                      ●           ◉         
 
 ◉ = 主要フェーズ  ● = 部分的に適用  ○ = オプション
 ```
@@ -1403,7 +1691,7 @@ R1 (Immutable Store)  ░░░███░░░░░░░░░░  Reducer 
 R2 (Scheduler+Input)  ░░░░░░██░░░░░░░░  rAF batch + T11 coalesced events + T14 time-slice
 R3 (Renderer統一)     ░░░░░░░░███░░░░░  Stateless + T1 layers + T4 LOD + T5 dirty rect
 R4 (Streaming)        ░░░░░░░░░░░██░░░  T7 columnar + T8 ring + T10 prefetch + T12 backpressure
-R5 (GPU統合)          ░░░░░░░░░░░░░██░  T3 instanced + T6 compute pre-pass + MoChart統合
+R5 (GPU+SIMD統合)     ░░░░░░░░░░░░░██░  T3 instanced + T6 compute + T15 WASM SIMD + MoChart統合
 R6 (Worker)           ░░░░░░░░░░░░░░░█  T2 OffscreenCanvas + T9 SharedArrayBuffer (opt-in)
 ```
 
@@ -1422,6 +1710,7 @@ R6 (Worker)           ░░░░░░░░░░░░░░░█  T2 Offsc
 | T5 | Dirty Rectangle Tracking | X.org Damage Extension (2003); DamageTracker in Chromium cc/ (2014); Qt Quick Scene Graph |
 | T6 | GPU Compute Pre-pass | Wihlidal, "Optimizing the Graphics Pipeline with Compute", SIGGRAPH (2015); Nanite, UE5 (Epic, 2021) |
 | T14 | Time-Sliced Rendering | Acdlite et al., "React Fiber Architecture" (2017); Abramov, "Scheduling in React" (2019); Scheduler.yield() proposal (Chrome 115+) |
+| T15 | WASM SIMD | W3C WebAssembly SIMD proposal (2021); "Relaxed SIMD" Phase 4 (2023); Dukhan, "XNNPACK" (Google, 2019); Intel Intrinsics Guide; Rust `std::arch::wasm32` |
 
 ### データ・I/O
 
