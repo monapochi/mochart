@@ -23,26 +23,7 @@ export interface SeriesOptions {
 }
 
 import { CanvasRenderer } from '../renderer/canvas/canvasRenderer';
-
-type RendererViewportOptions = {
-  startIndex?: number;
-  visibleCount?: number;
-  rightMarginBars?: number;
-  yAxisGutterPx?: number;
-  xAxisHeightPx?: number;
-  maxVisibleBars?: number;
-  paddingRatio?: number;
-  minPaddingPx?: number;
-  color?: string;
-  lineWidth?: number;
-};
-
-type ViewportRenderer = {
-  drawSeries: (seriesId: string, data: Array<any>, options?: RendererViewportOptions) => void;
-  getLayout: (data: Array<any>, options?: RendererViewportOptions) => any;
-  mapClientToData: (clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) => any;
-  drawCrosshairAt: (clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) => void;
-};
+import type { RendererViewportOptions, ViewportRenderer } from '../renderer/renderer';
 
 // Minimal ChartCore skeleton to be expanded.
 export class ChartCore {

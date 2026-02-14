@@ -1,4 +1,6 @@
-export class CanvasRenderer {
+import type { RendererLayout, RendererViewportOptions, ViewportRenderer } from '../renderer';
+
+export class CanvasRenderer implements ViewportRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
 
@@ -39,7 +41,7 @@ export class CanvasRenderer {
     return v.toLocaleString(undefined, { maximumFractionDigits: digits });
   }
 
-  drawSeries(seriesId: string, data: Array<any>, options?: {
+  drawSeries(seriesId: string, data: Array<any>, options?: RendererViewportOptions & {
     outlineColor?: string;
     wickColor?: string;
     upColor?: string;
@@ -48,13 +50,6 @@ export class CanvasRenderer {
     font?: string;
     gridColor?: string;
     axisLabelColor?: string;
-    yAxisGutterPx?: number;
-    xAxisHeightPx?: number;
-    paddingRatio?: number;
-    minPaddingPx?: number;
-    maxVisibleBars?: number;
-    startIndex?: number;
-    visibleCount?: number;
     targetXTicks?: number;
     targetYTicks?: number;
   }) {
@@ -231,7 +226,7 @@ export class CanvasRenderer {
     this.ctx.beginPath(); this.ctx.moveTo(plotX, plotY + plotH); this.ctx.lineTo(plotX + plotW, plotY + plotH); this.ctx.stroke();
   }
 
-  getLayout(data: Array<any>, options?: { yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number; paddingRatio?: number; minPaddingPx?: number; rightMarginBars?: number }) {
+  getLayout(data: Array<any>, options?: RendererViewportOptions): RendererLayout {
     const w = this.canvas.clientWidth || 800;
     const h = this.canvas.clientHeight || 600;
     const gutterLeft = options?.yAxisGutterPx ?? 56;
@@ -273,7 +268,7 @@ export class CanvasRenderer {
     return { plotX, plotY, plotW, plotH, gutterLeft, gutterTop, xAxisHeight, startIndex: startFloor, startIndexRaw: startRaw, visibleCount, stepX, candleW, yMin, yMax, rightMarginBars };
   }
 
-  mapClientToData(clientX: number, clientY: number, data: Array<any>, options?: { yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number; paddingRatio?: number; minPaddingPx?: number }) {
+  mapClientToData(clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) {
     const layout = this.getLayout(data, options);
     const { plotX, plotY, plotW, plotH, startIndex, visibleCount, stepX, yMin, yMax } = layout;
     const startRaw = (layout as any).startIndexRaw ?? startIndex;
@@ -292,7 +287,7 @@ export class CanvasRenderer {
     return { index: dataIdx, localIndex: clamped, time: point.time, point, x, y: plotY + localY, priceAtY };
   }
 
-  drawCrosshairAt(clientX: number, clientY: number, data: Array<any>, options?: { color?: string; lineWidth?: number; yAxisGutterPx?: number; xAxisHeightPx?: number; maxVisibleBars?: number; startIndex?: number; visibleCount?: number }) {
+  drawCrosshairAt(clientX: number, clientY: number, data: Array<any>, options?: RendererViewportOptions) {
     const layout = this.getLayout(data, options);
     const { plotX, plotY, plotW, plotH, startIndex, visibleCount, stepX, yMin, yMax } = layout as any;
     const mapped = this.mapClientToData(clientX, clientY, data, options);
