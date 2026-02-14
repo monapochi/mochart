@@ -508,10 +508,10 @@ interface ChartRenderer {
 
 ---
 
-### Phase R5: MoChart 統合 + GPU-Driven Rendering
-> 目的: 二重系統を統一。GPU の性能を最大限活用。
+### Phase R5: MoChart 統合 + GPU+SIMD Rendering
+> 目的: 二重系統を統一。GPU と WASM SIMD の性能を最大限活用。
 
-技法 T3 (Instanced Drawing), T6 (GPU Compute Pre-pass) を組み込む。詳細は §9.1 参照。
+技法 T3 (Instanced Drawing), T6 (GPU Compute Pre-pass), T15 (WASM SIMD) を組み込む。詳細は §9.1, §9.2 参照。
 
 | # | タスク | 概要 |
 |---|--------|------|
@@ -520,9 +520,9 @@ interface ChartRenderer {
 | R5-3 | **GPU Compute Pre-pass** (T6) | price range + 頂点生成を compute shader で並列実行 |
 | R5-4 | **WASM SIMD インジケータカーネル** (T15) | Rust で SMA/EMA/Bollinger/RSI/MACD/ATR/LTTB を SIMD 実装。TS fallback 付き |
 | R5-5 | **計算パイプライン分岐** | GPU 利用可 → T6、不可 → T15 WASM SIMD → TS の3段フォールバック |
-| R5-4 | WebGPURenderer が `render(snapshot)` を実装 | Stateless ChartRenderer interface 準拠 |
-| R5-5 | MoChart クラスを deprecated → createChart ファクトリに | 外部API は `createChart()` 一本に |
-| R5-6 | 未使用コード削除 | ChartCore の旧 drawSeries 呼び出し等 |
+| R5-6 | WebGPURenderer が `render(snapshot)` を実装 | Stateless ChartRenderer interface 準拠 |
+| R5-7 | MoChart クラスを deprecated → createChart ファクトリに | 外部API は `createChart()` 一本に |
+| R5-8 | 未使用コード削除 | ChartCore の旧 drawSeries 呼び出し等 |
 
 ---
 
@@ -1374,6 +1374,8 @@ function yieldToMain(): Promise<void> {
 | LTTB downsampling 1M→2000 | 1,000,000 | ~18 ms | ~3 ms | **6×** |
 | 20 indicators simultaneous | 500,000 | ~120 ms (> 2 frames) | ~15 ms (< 1 frame) | **8×** |
 
+※ 測定前提（目安）: Apple M2 Pro / Chrome 121 / Float32Array 入力 / warm cache / 単系列 / GC pause 除外。最終値は R5 でベンチ実測して更新する。
+
 **原理**: WebAssembly SIMD は 128-bit ベクトルレジスタ (`v128`) を提供し、4つの `f32` または 2つの `f64` を1命令で同時処理する。V8 の auto-vectorization (TurboFan) は TypedArray の単純ループでは *たまに* 働くが、依存関係のある積算 (EMA, MACD) やブランチを含む処理 (RSI gain/loss) ではスカラーにフォールバックする。WASM SIMD は *確実に* ベクトル化される。
 
 ```
@@ -1574,6 +1576,12 @@ calculate: async (data, { period }) => {
 }
 ```
 
+**API 互換注記**: 現行 `IndicatorDefinition.calculate` が同期契約の場合、段階導入は次の2案とする。
+- **A案（推奨）**: `calculate` は同期のまま維持し、WASM は起動時プリロード（未ロード時は TS 経路）。
+- **B案**: `calculateAsync` を新設し、既存同期 API は互換レイヤーとして残す。
+
+R5 では A案で破壊的変更を回避し、R6 以降で `calculateAsync` への段階移行可否を再評価する。
+
 **計算パイプライン分岐** (GPU / WASM SIMD / TS のフォールバック連鎖):
 
 ```
@@ -1680,6 +1688,12 @@ T15 WASM SIMD                      ●           ◉
 | R6-3 | Atomics ベース同期 | `Atomics.notify/wait` でフレーム同期、postMessage 不要 |
 | R6-4 | フォールバック | Safari / SharedArrayBuffer 非対応時は main-thread Canvas に自動フォールバック |
 | R6-5 | `{ renderer: 'canvas-worker' }` オプション | オプトイン方式で有効化 |
+
+**R6 デプロイ前提チェックリスト**:
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Embedder-Policy: require-corp`
+- 依存する CDN/script/font が CORP/COEP を満たすこと
+- 非対応環境で `renderer: 'auto'` が main-thread Canvas に確実フォールバックすること
 
 ---
 
