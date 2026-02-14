@@ -439,6 +439,7 @@ function reduce(state: ChartState, action: Action): ChartState { ... }
 | R2-5 | `chart.batch()` 公開 API | ユーザーが複数操作をアトミックにまとめられる API |
 | R2-6 | IntersectionObserver 統合 | 画面外で rAF 停止、復帰時に1回 flush |
 | R2-7 | ResizeObserver 統合 | container サイズ変更 → `RESIZE` action enqueue |
+| R2-8 | 描画計測基盤の導入 | `performance.mark/measure` で `reduce`/`render`/`upload`/`draw` を計測し、SIMD/Worker 導入判定に利用 |
 
 **成果物**:
 - pinch の `zoomAt + panBy` → 1回描画 (現状2-3回)
@@ -483,6 +484,7 @@ interface ChartRenderer {
 | R3-5 | **Multi-Layer Compositing** (T1) | static / candles / overlay / animation の4層分離 |
 | R3-6 | **Dirty Rectangle Tracking** (T5) | フレーム差分で変更矩形だけ再描画。スクロールは `drawImage` shift |
 | R3-7 | **LTTB Downsampling** (T4) | visibleCount > plotWidth 時に自動ダウンサンプリング |
+| R3-8 | **SIMD 頂点前処理（条件導入）** | 可視本数が閾値超過時のみ WASM SIMD で座標/頂点前処理を実行（小規模データは TS 経路維持） |
 
 **成果物**: renderer が state を持たない。hover で overlay 層のみ更新 (描画面積 90% 削減)。100万本でも LOD で 60fps。
 
@@ -518,6 +520,7 @@ interface ChartRenderer {
 | R5-1 | MoChart のインジケータ計算を Store 側に移設 | `computeIndicatorSegments` → Store の middleware 的に |
 | R5-2 | **Instanced Candle Rendering** (T3) | 1 draw call で N 本のローソク足。per-instance OHLC buffer |
 | R5-3 | **GPU Compute Pre-pass** (T6) | price range + 頂点生成を compute shader で並列実行 |
+| R5-3a | **Compute 前処理の計測ゲート** | GPU pre-pass と SIMD CPU 前処理をベンチ比較し、系列数/データ量で実行経路を自動選択 |
 | R5-4 | **WASM SIMD インジケータカーネル** (T15) | Rust で SMA/EMA/Bollinger/RSI/MACD/ATR/LTTB を SIMD 実装。TS fallback 付き |
 | R5-5 | **計算パイプライン分岐** | GPU 利用可 → T6、不可 → T15 WASM SIMD → TS の3段フォールバック |
 | R5-6 | WebGPURenderer が `render(snapshot)` を実装 | Stateless ChartRenderer interface 準拠 |
@@ -1688,6 +1691,7 @@ T15 WASM SIMD                      ●           ◉
 | R6-3 | Atomics ベース同期 | `Atomics.notify/wait` でフレーム同期、postMessage 不要 |
 | R6-4 | フォールバック | Safari / SharedArrayBuffer 非対応時は main-thread Canvas に自動フォールバック |
 | R6-5 | `{ renderer: 'canvas-worker' }` オプション | オプトイン方式で有効化 |
+| R6-6 | Geometry Worker 分離 | 頂点生成・min/max・LOD 前処理を Worker へ分離し、main thread は入力処理と描画提出に専念 |
 
 **R6 デプロイ前提チェックリスト**:
 - `Cross-Origin-Opener-Policy: same-origin`

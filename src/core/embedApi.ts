@@ -15,10 +15,14 @@ export interface ChartEmbedOptions extends ChartCoreOptions {
 
 export interface ChartEmbedAPI {
   create(container: HTMLElement, options?: ChartEmbedOptions): Promise<ChartCore>;
-  connectFeed(adapter: any): Promise<void>;
   disconnectFeed(): Promise<void>;
   on(event: string, handler: EventHandler): void;
   off(event: string, handler?: EventHandler): void;
+  setViewport(from: number, to: number): void;
+  panBy(deltaIndex: number): void;
+  zoomAt(factor: number, centerIndex?: number): void;
+  attach(container: HTMLElement): void;
+  detach(): void;
   destroy(): Promise<void>;
 }
 
