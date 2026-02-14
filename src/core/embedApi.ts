@@ -8,6 +8,7 @@ export interface ChartEmbedOptions extends ChartCoreOptions {
   showLegend?: boolean;
   enableCrosshair?: boolean;
   attachEvents?: boolean;
+  smoothScroll?: boolean;
   symbol?: string;
   tooltipFormatter?: (point: any, index: number) => string;
 }
@@ -37,8 +38,11 @@ export function createEmbedAPI(): ChartEmbedAPI {
     private opts: any = {};
     // touch pinch state
     private _pinchStartDist: number | null = null;
+    private _pinchLastDist: number | null = null;
     private _pinchStartCenterClientX: number | null = null;
     private _pinchStartCenterIndex: number | undefined = undefined;
+    private _pinchStartCenterRatio: number | undefined = undefined;
+    private _wheelPanRemainderPx: number = 0;
 
     async create(container: HTMLElement, options?: any): Promise<ChartCore> {
       const mod = await import('./chart');
@@ -207,13 +211,40 @@ export function createEmbedAPI(): ChartEmbedAPI {
         const cx = ev.clientX - rect.left;
         const mx = cx;
         const vr = this.core!.getVisibleRange();
+        const rawStartIndex = (this.core as any)?.viewportStartIndex;
         const wheelOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
-          ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+          ? { ...this.opts, startIndex: (typeof rawStartIndex === 'number' ? rawStartIndex : vr.from), visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
           : this.opts;
-        const mapped = renderer.mapClientToData(mx, rect.height / 2, this._getPrimarySeriesData(), wheelOpts);
-        const centerIndex = mapped ? mapped.index : undefined;
-        const factor = ev.deltaY < 0 ? 1 / 1.15 : 1.15;
-        this.core.zoomAt(factor, centerIndex);
+
+        if (ev.ctrlKey) {
+          // Pinch-to-zoom on Mac trackpad (or Ctrl+wheel on mouse)
+          this._wheelPanRemainderPx = 0;
+          const mapped = renderer.mapClientToData(mx, rect.height / 2, this._getPrimarySeriesData(), wheelOpts);
+          const centerIndex = mapped ? mapped.index : undefined;
+          const factor = ev.deltaY < 0 ? 1 / 1.15 : 1.15;
+          this.core.zoomAt(factor, centerIndex);
+        } else {
+          // Two-finger slide / wheel scroll: pan only (avoid unintended zoom)
+          const primaryData = this._getPrimarySeriesData();
+          const layout = renderer.getLayout ? renderer.getLayout(primaryData, wheelOpts) : null;
+          const stepX = layout ? layout.stepX : 10;
+          const dominantDelta = Math.abs(ev.deltaX) >= Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+          const smoothScroll = this.opts.smoothScroll !== false;
+          if (smoothScroll && typeof (this.core as any).panByBars === 'function') {
+            this._wheelPanRemainderPx = 0;
+            const deltaBars = dominantDelta / Math.max(1e-6, stepX);
+            if (deltaBars !== 0) (this.core as any).panByBars(deltaBars);
+          } else {
+            const accumulatedPx = this._wheelPanRemainderPx + dominantDelta;
+            const deltaIndex = accumulatedPx > 0
+              ? Math.floor(accumulatedPx / stepX)
+              : Math.ceil(accumulatedPx / stepX);
+            this._wheelPanRemainderPx = accumulatedPx - deltaIndex * stepX;
+            if (deltaIndex !== 0) {
+              this.core.panBy(deltaIndex);
+            }
+          }
+        }
       };
 
       // touch events: support pinch-zoom
@@ -226,36 +257,62 @@ export function createEmbedAPI(): ChartEmbedAPI {
           const dx = t1.clientX - t0.clientX;
           const dy = t1.clientY - t0.clientY;
           this._pinchStartDist = Math.hypot(dx, dy);
+          this._pinchLastDist = this._pinchStartDist;
           this._pinchStartCenterClientX = (t0.clientX + t1.clientX) / 2 - canvas.getBoundingClientRect().left;
           const vr = this.core!.getVisibleRange();
           const touchOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
             ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
             : this.opts;
-          const mapped = renderer.mapClientToData(this._pinchStartCenterClientX, (canvas.height / (window.devicePixelRatio || 1)) / 2, this._getPrimarySeriesData(), touchOpts);
+          const layout = renderer.getLayout ? renderer.getLayout(this._getPrimarySeriesData(), touchOpts) : null;
+          if (layout && typeof this._pinchStartCenterClientX === 'number') {
+            const localX = this._pinchStartCenterClientX - layout.plotX;
+            const slot = localX / Math.max(1e-6, layout.stepX);
+            const slotsDenom = Math.max(1, (layout.visibleCount + (layout.rightMarginBars ?? 0) - 1));
+            this._pinchStartCenterRatio = Math.max(0, Math.min(1, slot / slotsDenom));
+          } else {
+            this._pinchStartCenterRatio = undefined;
+          }
+          const rect = canvas.getBoundingClientRect();
+          const mapped = renderer.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, this._getPrimarySeriesData(), touchOpts);
           this._pinchStartCenterIndex = mapped ? mapped.index : undefined;
         }
       };
 
       const onTouchMove = (ev: TouchEvent) => {
         if (!canvas || !this.core) return;
-        if (ev.touches.length === 2 && this._pinchStartDist) {
+        if (ev.touches.length === 2 && this._pinchStartDist && this._pinchLastDist) {
           ev.preventDefault();
           const t0 = ev.touches[0];
           const t1 = ev.touches[1];
           const dx = t1.clientX - t0.clientX;
           const dy = t1.clientY - t0.clientY;
           const dist = Math.hypot(dx, dy);
-          const factor = this._pinchStartDist > 0 ? dist / this._pinchStartDist : 1;
-          const clamped = Math.max(0.5, Math.min(2.5, factor));
-          this.core.zoomAt(1 / clamped, this._pinchStartCenterIndex);
+          const factor = this._pinchLastDist > 0 ? dist / this._pinchLastDist : 1;
+          const clamped = Math.max(0.8, Math.min(1.25, factor));
+          this.core.zoomAt(1 / clamped, this._pinchStartCenterIndex, this._pinchStartCenterRatio);
+          if (typeof this._pinchStartCenterClientX === 'number' && typeof this._pinchStartCenterIndex === 'number') {
+            const vr = this.core.getVisibleRange();
+            const touchOpts = vr && typeof vr.from === 'number' && typeof vr.to === 'number'
+              ? { ...this.opts, startIndex: vr.from, visibleCount: vr.to - vr.from + 1, rightMarginBars: vr.rightMarginBars ?? 0 }
+              : this.opts;
+            const rect = canvas.getBoundingClientRect();
+            const mappedAfter = renderer.mapClientToData(this._pinchStartCenterClientX, rect.height / 2, this._getPrimarySeriesData(), touchOpts);
+            if (mappedAfter) {
+              const correction = this._pinchStartCenterIndex - mappedAfter.index;
+              if (correction !== 0) this.core.panBy(correction);
+            }
+          }
+          this._pinchLastDist = dist;
         }
       };
 
       const onTouchEnd = (ev: TouchEvent) => {
         if (ev.touches.length < 2) {
           this._pinchStartDist = null;
+          this._pinchLastDist = null;
           this._pinchStartCenterClientX = null;
           this._pinchStartCenterIndex = undefined;
+          this._pinchStartCenterRatio = undefined;
         }
       };
 
@@ -266,6 +323,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
       canvas.addEventListener('touchstart', onTouchStart, { passive: false });
       canvas.addEventListener('touchmove', onTouchMove, { passive: false });
       canvas.addEventListener('touchend', onTouchEnd);
+      canvas.addEventListener('touchcancel', onTouchEnd);
 
       // handle lost pointer capture (e.g., when window loses focus)
       const onLostPointerCapture = () => {
@@ -380,6 +438,7 @@ export function createEmbedAPI(): ChartEmbedAPI {
         canvas.removeEventListener('touchstart', l.onTouchStart as EventListener);
         canvas.removeEventListener('touchmove', l.onTouchMove as EventListener);
         canvas.removeEventListener('touchend', l.onTouchEnd as EventListener);
+        canvas.removeEventListener('touchcancel', l.onTouchEnd as EventListener);
         canvas.removeEventListener('lostpointercapture', l.onLostPointerCapture);
       }
       if (this.tooltipEl && this.tooltipEl.parentElement) this.tooltipEl.parentElement.removeChild(this.tooltipEl);

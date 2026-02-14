@@ -36,6 +36,16 @@ export class ChartCore {
   private viewportVisibleCount: number = 200;
   private rightMarginBars: number = 0;
 
+  private getEffectiveRightMarginBars(len?: number, start?: number, visibleCount?: number): number {
+    if (this.rightMarginBars <= 0) return 0;
+    const dataLen = typeof len === 'number' ? len : this.getDataLength();
+    const from = typeof start === 'number' ? start : this.viewportStartIndex;
+    const visible = typeof visibleCount === 'number' ? visibleCount : this.viewportVisibleCount;
+    const maxStartNoMargin = Math.max(0, dataLen - visible);
+    const atLatestEdge = from >= maxStartNoMargin;
+    return atLatestEdge ? this.rightMarginBars : 0;
+  }
+
   // simple event emitter
   private listeners: Map<string, Set<(payload?: any) => void>> = new Map();
 
@@ -129,8 +139,9 @@ export class ChartCore {
     // render immediately on canvas renderer if available
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
+      const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       try {
-        renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars }));
+        renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: effectiveRightMarginBars }));
       } catch (e) { console.warn(e); }
     }
   }
@@ -183,6 +194,14 @@ export class ChartCore {
     return c;
   }
 
+  private emitRangeChanged(): void {
+    const len = this.getDataLength();
+    if (len === 0) return;
+    const from = Math.max(0, Math.min(len - 1, Math.floor(this.viewportStartIndex)));
+    const to = Math.max(0, Math.min(len - 1, from + this.viewportVisibleCount - 1));
+    this.emit('rangeChanged', { from, to });
+  }
+
   async updateSeries(seriesId: string, patch: { index: number; point: any }[]): Promise<void> {
     const entry = this.seriesStore.get(seriesId);
     if (!entry) throw new Error(`Series ${seriesId} not found`);
@@ -210,9 +229,9 @@ export class ChartCore {
   getVisibleRange(): { from: number; to: number; rightMarginBars?: number } | null {
     const len = this.getDataLength();
     if (len === 0) return null;
-    const from = Math.max(0, Math.min(len - 1, this.viewportStartIndex));
-    const to = Math.max(0, Math.min(len - 1, this.viewportStartIndex + this.viewportVisibleCount - 1));
-    return { from, to, rightMarginBars: this.rightMarginBars };
+    const from = Math.max(0, Math.min(len - 1, Math.floor(this.viewportStartIndex)));
+    const to = Math.max(0, Math.min(len - 1, from + this.viewportVisibleCount - 1));
+    return { from, to, rightMarginBars: this.getEffectiveRightMarginBars(len, from, this.viewportVisibleCount) };
   }
 
   setVisibleRange(from: number, to: number): void {
@@ -223,12 +242,13 @@ export class ChartCore {
     const t = Math.max(0, Math.min(len - 1, to));
     this.viewportStartIndex = Math.min(f, t);
     this.viewportVisibleCount = Math.max(1, t - f + 1);
-    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    this.emitRangeChanged();
     // force redraw of all series
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
+      const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: effectiveRightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
@@ -238,36 +258,48 @@ export class ChartCore {
   }
 
   panBy(deltaIndex: number): void {
+    this.panByBars(deltaIndex);
+  }
+
+  panByBars(deltaBars: number): void {
     const len = this.getDataLength();
     if (len === 0) return;
     const maxStart = Math.max(0, len - this.viewportVisibleCount);
-    this.viewportStartIndex = Math.max(0, Math.min(maxStart, this.viewportStartIndex + deltaIndex));
-    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    this.viewportStartIndex = Math.max(0, Math.min(maxStart, this.viewportStartIndex + deltaBars));
+    this.emitRangeChanged();
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
+      const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: effectiveRightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
 
-  zoomAt(factor: number, centerIndex?: number): void {
+  zoomAt(factor: number, centerIndex?: number, centerRatio?: number): void {
     const len = this.getDataLength();
     if (len === 0) return;
     const minVisible = 5;
     let newCount = Math.max(minVisible, Math.min(len, Math.round(this.viewportVisibleCount * factor)));
     // determine center
     const center = typeof centerIndex === 'number' ? centerIndex : Math.min(len - 1, this.viewportStartIndex + Math.floor(this.viewportVisibleCount / 2));
-    const rel = (center - this.viewportStartIndex) / Math.max(1, this.viewportVisibleCount - 1);
-    let newStart = center - Math.round(rel * (newCount - 1));
+    const rightMargin = Math.max(0, this.getEffectiveRightMarginBars(len, this.viewportStartIndex, this.viewportVisibleCount));
+    const prevSlots = Math.max(1, this.viewportVisibleCount + rightMargin - 1);
+    const computedRel = (center - this.viewportStartIndex) / prevSlots;
+    const rel = typeof centerRatio === 'number'
+      ? Math.max(0, Math.min(1, centerRatio))
+      : Math.max(0, Math.min(1, computedRel));
+    const newSlots = Math.max(1, newCount + rightMargin - 1);
+    let newStart = center - (rel * newSlots);
     newStart = Math.max(0, Math.min(len - newCount, newStart));
     this.viewportStartIndex = newStart;
     this.viewportVisibleCount = newCount;
-    this.emit('rangeChanged', { from: this.viewportStartIndex, to: this.viewportStartIndex + this.viewportVisibleCount - 1 });
+    this.emitRangeChanged();
     const renderer = (this as any)._renderer;
     if (renderer && typeof renderer.drawSeries === 'function') {
+      const effectiveRightMarginBars = this.getEffectiveRightMarginBars();
       for (const [seriesId, entry] of this.seriesStore.entries()) {
-        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: this.rightMarginBars })); } catch (e) { console.warn(e); }
+        try { renderer.drawSeries(seriesId, entry.data, Object.assign({}, entry.options, { startIndex: this.viewportStartIndex, visibleCount: this.viewportVisibleCount, rightMarginBars: effectiveRightMarginBars })); } catch (e) { console.warn(e); }
       }
     }
   }
