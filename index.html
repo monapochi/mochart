@@ -692,8 +692,26 @@
   - Spawns DataWorker with { synthetic: true, barCount: 1_000_000 }
   - Spawns RenderWorker with OffscreenCanvas
   - Writes viewport SAB on every rAF tick
+
+  IMPORTANT: The module requires crossOriginIsolated (SharedArrayBuffer).
+  coi-serviceworker.js enables this via SW + page reload, but that is async.
+  We must guard the module load to avoid executing before isolation is active.
 -->
-<script type="module" src="demo/chart_host_lp.js"></script>
+<script>
+  if (window.crossOriginIsolated) {
+    // SW is active and headers are injected — safe to use SharedArrayBuffer.
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = 'demo/chart_host_lp.js';
+    document.body.appendChild(s);
+  } else {
+    // First visit or SW not yet active — coi-serviceworker.js will reload.
+    // Show a brief message while waiting.
+    const msg = document.querySelector('.loader-msg');
+    if (msg) msg.textContent = 'Enabling cross-origin isolation…';
+    console.log('[lp] crossOriginIsolated is false — waiting for coi-serviceworker reload');
+  }
+</script>
 
 <script>
   // Update loading overlay from chart host events
