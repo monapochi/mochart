@@ -152,10 +152,10 @@ self.onmessage = async (evt) => {
     // 2. Load OHLCV data: synthetic (1M bars) or binary fixture
     const useSynthetic = evt.data.synthetic === true;
     const dataFile     = evt.data.dataFile || '../MSFT.bin';
-    const syntheticN   = (evt.data.barCount | 0) || 1_000_000;
+    const targetN      = (evt.data.barCount | 0) || 1_000_000;
     const { store: s, barCount } = useSynthetic
-      ? loadSyntheticOhlcv(syntheticN, wasmMemory)
-      : await loadBinaryOhlcv(new URL(dataFile, import.meta.url).href, wasmMemory);
+      ? loadSyntheticOhlcv(targetN, wasmMemory)
+      : await loadBinaryOhlcv(new URL(dataFile, import.meta.url).href, wasmMemory, targetN);
     store     = s;
     totalBars = barCount;
     console.log(`[data_worker] ingested ${barCount} bars`);
@@ -329,31 +329,68 @@ function _writeIndSab(_visBars, revision) {
 }
 
 // ── OHLCV loader (same as render_worker.js) ───────────────────────────────
-async function loadBinaryOhlcv(url, memory) {
+async function loadBinaryOhlcv(url, memory, targetN = 0) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status}`);
   const ab = await resp.arrayBuffer();
-  const N  = new Uint32Array(ab, 0, 1)[0];
+  const baseN = new Uint32Array(ab, 0, 1)[0];
 
   const OFF_TIME   = 8;
-  const OFF_OPEN   = 8 + N * 8;
-  const OFF_HIGH   = OFF_OPEN   + N * 4;
-  const OFF_LOW    = OFF_HIGH   + N * 4;
-  const OFF_CLOSE  = OFF_LOW    + N * 4;
-  const OFF_VOLUME = OFF_CLOSE  + N * 4;
+  const OFF_OPEN   = 8 + baseN * 8;
+  const OFF_HIGH   = OFF_OPEN   + baseN * 4;
+  const OFF_LOW    = OFF_HIGH   + baseN * 4;
+  const OFF_CLOSE  = OFF_LOW    + baseN * 4;
+  const OFF_VOLUME = OFF_CLOSE  + baseN * 4;
 
-  const srcClose  = new Float32Array(ab, OFF_CLOSE, N);
+  const srcTime   = new Float64Array(ab, OFF_TIME,   baseN);
+  const srcOpen   = new Float32Array(ab, OFF_OPEN,   baseN);
+  const srcHigh   = new Float32Array(ab, OFF_HIGH,   baseN);
+  const srcLow    = new Float32Array(ab, OFF_LOW,    baseN);
+  const srcClose  = new Float32Array(ab, OFF_CLOSE,  baseN);
+  const srcVolume = new Float32Array(ab, OFF_VOLUME, baseN);
+
+  const N = targetN > baseN ? targetN : baseN;
+
   const tickSize  = estimateTickSize(srcClose);
   const basePrice = srcClose[0] ?? 100.0;
 
   const newStore  = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
 
-  new Float64Array(memory.buffer, newStore.ingest_time_ptr(),   N).set(new Float64Array(ab, OFF_TIME,   N));
-  new Float32Array(memory.buffer, newStore.ingest_open_ptr(),   N).set(new Float32Array(ab, OFF_OPEN,   N));
-  new Float32Array(memory.buffer, newStore.ingest_high_ptr(),   N).set(new Float32Array(ab, OFF_HIGH,   N));
-  new Float32Array(memory.buffer, newStore.ingest_low_ptr(),    N).set(new Float32Array(ab, OFF_LOW,    N));
-  new Float32Array(memory.buffer, newStore.ingest_close_ptr(),  N).set(srcClose);
-  new Float32Array(memory.buffer, newStore.ingest_volume_ptr(), N).set(new Float32Array(ab, OFF_VOLUME, N));
+  const dstTime   = new Float64Array(memory.buffer, newStore.ingest_time_ptr(),   N);
+  const dstOpen   = new Float32Array(memory.buffer, newStore.ingest_open_ptr(),   N);
+  const dstHigh   = new Float32Array(memory.buffer, newStore.ingest_high_ptr(),   N);
+  const dstLow    = new Float32Array(memory.buffer, newStore.ingest_low_ptr(),    N);
+  const dstClose  = new Float32Array(memory.buffer, newStore.ingest_close_ptr(),  N);
+  const dstVolume = new Float32Array(memory.buffer, newStore.ingest_volume_ptr(), N);
+
+  let offset = 0;
+  
+  while (offset < N) {
+    const chunkN = Math.min(baseN, N - offset);
+
+    if (offset === 0) {
+      dstTime.set(srcTime.subarray(0, chunkN), offset);
+      dstOpen.set(srcOpen.subarray(0, chunkN), offset);
+      dstHigh.set(srcHigh.subarray(0, chunkN), offset);
+      dstLow.set(srcLow.subarray(0, chunkN), offset);
+      dstClose.set(srcClose.subarray(0, chunkN), offset);
+      dstVolume.set(srcVolume.subarray(0, chunkN), offset);
+    } else {
+      // Connect seams visually by continuing the price and time
+      const timeDelta = dstTime[offset - 1] - srcTime[0] + (srcTime[1] - srcTime[0] || 60000);
+      const priceDelta = dstClose[offset - 1] - srcOpen[0];
+
+      for (let i = 0; i < chunkN; i++) {
+        dstTime[offset + i]   = srcTime[i] + timeDelta;
+        dstOpen[offset + i]   = srcOpen[i] + priceDelta;
+        dstHigh[offset + i]   = srcHigh[i] + priceDelta;
+        dstLow[offset + i]    = srcLow[i] + priceDelta;
+        dstClose[offset + i]  = srcClose[i] + priceDelta;
+        dstVolume[offset + i] = srcVolume[i];
+      }
+    }
+    offset += chunkN;
+  }
 
   newStore.commit_ingestion(N);
   newStore.free_ingest_buffers();
