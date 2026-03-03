@@ -1,8 +1,7 @@
 /**
- * chart_host_lp.js — Landing Page chart host (synthetic 1M bars)
+ * chart_host_lp.js — Landing Page chart host (real MSFT data)
  *
  * Derived from chart_host.js with the following LP-specific changes:
- *   • dataWorker init adds { synthetic: true, barCount: 1_000_000 }
  *   • No SMA checkbox / period input wiring (all indicators enabled by default)
  *   • Worker status routed to window._lpOnReady / _lpOnPerf / _lpOnProgress
  *   • No baseline save / JSON export keyboard shortcuts
@@ -68,12 +67,9 @@ renderWorker.postMessage(
   [gpuOff, hudOff],
 );
 
-// LP key difference: request synthetic 1M-bar generation instead of binary file.
 dataWorker.postMessage({
   type: 'init',
   ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR,
-  synthetic: false,
-  dataFile: '../MSFT.bin',
 });
 
 // Set default SMA periods to the same values as the demo.

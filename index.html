@@ -7,7 +7,7 @@
   <meta name="description" content="A financial charting library. 40 years of real market data rendered via Rust WASM + WebGPU.">
   <link rel="icon" href="data:,">
   <meta property="og:title" content="Mochart — 40 Years of MSFT. Rendered in &lt; 2ms.">
-  <meta property="og:description" content="WebGPU + Rust WASM financial charting. 1,000,000 bars at 60fps.">
+  <meta property="og:description" content="≈ Zero GC. WebGPU + Rust WASM financial charting at 60fps.">
 
   <!-- SharedArrayBuffer needs COOP/COEP.
        GitHub Pages doesn't support custom headers, so we use a service worker. -->
@@ -142,6 +142,7 @@
       border-radius: 4px;
       padding: 4px 10px;
       color: var(--muted);
+      -webkit-backdrop-filter: blur(4px);
       backdrop-filter: blur(4px);
     }
     .stat-chip .v { color: var(--accent); font-weight: 600; }
@@ -506,7 +507,7 @@
     <div id="hero-tagline">
       40 Years of MSFT.<br>Rendered in &lt;&nbsp;2ms.
     </div>
-    <p id="hero-sub">A financial charting library for the modern web.</p>
+    <p id="hero-sub">&asymp; Zero GC. WebGPU + Rust WASM financial charting for the modern web.</p>
   </div>
 
   <div id="live-stats">
@@ -542,9 +543,9 @@
       <div class="m-label">Consistent frame rate, even while panning</div>
     </div>
     <div class="metric-card">
-      <div class="m-val">0</div>
+      <div class="m-val">&asymp; 0</div>
       <div class="m-unit">GC pauses</div>
-      <div class="m-label">Zero allocations on the hot rendering path</div>
+      <div class="m-label">&asymp; Zero allocations on the hot rendering path</div>
     </div>
     <div class="metric-card">
       <div class="m-val">&lt;50</div>

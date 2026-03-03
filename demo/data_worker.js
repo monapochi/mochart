@@ -149,13 +149,8 @@ self.onmessage = async (evt) => {
     const wasmExports = initFn ? await initFn() : WasmModule;
     wasmMemory = wasmExports.memory;
 
-    // 2. Load OHLCV data: synthetic or real binary fixture
-    const useSynthetic = evt.data.synthetic === true;
-    const dataFile     = evt.data.dataFile || '../MSFT.bin';
-    const syntheticN   = (evt.data.barCount | 0) || 1_000_000;
-    const { store: s, barCount } = useSynthetic
-      ? loadSyntheticOhlcv(syntheticN, wasmMemory)
-      : await loadBinaryOhlcv(new URL(dataFile, import.meta.url).href, wasmMemory);
+    // 2. Fetch OHLCV binary and ingest (uses WasmModule.OhlcvStore)
+    const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin', wasmMemory);
     store     = s;
     totalBars = barCount;
     console.log(`[data_worker] ingested ${barCount} bars`);
@@ -361,69 +356,8 @@ async function loadBinaryOhlcv(url, memory) {
   return { store: newStore, barCount: N };
 }
 
-// ── Synthetic OHLCV generator ─────────────────────────────────────────────
-/**
- * Generate n bars of synthetic OHLCV data (geometric random walk).
- * Zero per-bar allocation: pre-allocates typed arrays once.
- * @param {number} n  - bar count (e.g. 1_000_000)
- * @param {WebAssembly.Memory} memory
- * @returns {{ store: OhlcvStore, barCount: number }}
- */
-function loadSyntheticOhlcv(n, memory) {
-  const times   = new Float64Array(n);
-  const opens   = new Float32Array(n);
-  const highs   = new Float32Array(n);
-  const lows    = new Float32Array(n);
-  const closes  = new Float32Array(n);
-  const volumes = new Float32Array(n);
-
-  // Start 20 years ago at 1-minute bars
-  const BAR_MS  = 60 * 1000;           // 1-minute candles
-  const t0      = Date.now() - n * BAR_MS;
-  let price     = 100.0;
-  let t         = t0;
-
-  // Seeded LCG for reproducible demo look (no Math.random allocation per bar)
-  let rng = 0xDEADBEEF >>> 0;
-  const rand = () => {
-    rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0;
-    return rng / 0x100000000;
-  };
-
-  for (let i = 0; i < n; i++) {
-    const ret   = (rand() - 0.5) * 0.004;   // ~0.4% vol per bar
-    const open  = price;
-    price      *= (1.0 + ret);
-    const hl    = price * (rand() * 0.003 + 0.001);
-    const high  = Math.max(open, price) + hl;
-    const low   = Math.min(open, price) - hl;
-    times[i]    = t;
-    opens[i]    = open;
-    highs[i]    = high;
-    lows[i]     = low;
-    closes[i]   = price;
-    volumes[i]  = 50000 + rand() * 450000;
-    t          += BAR_MS;
-  }
-
-  const tickSize  = 0.01;
-  const basePrice = closes[0];
-  const newStore  = new WasmModule.OhlcvStore(tickSize, basePrice, n + 64, 1024);
-
-  new Float64Array(memory.buffer, newStore.ingest_time_ptr(),   n).set(times);
-  new Float32Array(memory.buffer, newStore.ingest_open_ptr(),   n).set(opens);
-  new Float32Array(memory.buffer, newStore.ingest_high_ptr(),   n).set(highs);
-  new Float32Array(memory.buffer, newStore.ingest_low_ptr(),    n).set(lows);
-  new Float32Array(memory.buffer, newStore.ingest_close_ptr(),  n).set(closes);
-  new Float32Array(memory.buffer, newStore.ingest_volume_ptr(), n).set(volumes);
-
-  newStore.commit_ingestion(n);
-  newStore.free_ingest_buffers();
-
-  return { store: newStore, barCount: n };
-}
-
-function estimateTickSize(closes) {  let minDiff = Infinity;
+function estimateTickSize(closes) {
+  let minDiff = Infinity;
   const n = Math.min(closes.length, 100);
   for (let i = 1; i < n; i++) {
     const d = Math.abs(closes[i] - closes[i - 1]);
