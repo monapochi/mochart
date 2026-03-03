@@ -1,44 +1,729 @@
 <!DOCTYPE html>
-<html>
-
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>prototype</title>
-  <style media="screen">
-    div.chart {
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mochart — 1M bars. 60fps. Zero GC.</title>
+  <meta name="description" content="A financial charting library. 1,000,000 bars rendered at 60fps via Rust WASM + WebGPU. Zero GC on the hot path.">
+  <meta property="og:title" content="Mochart — 1M bars. 60fps. Zero GC.">
+  <meta property="og:description" content="WebGPU + Rust WASM financial charting. 1,000,000 bars at 60fps.">
+
+  <!-- SharedArrayBuffer needs COOP/COEP.
+       GitHub Pages doesn't support custom headers, so we use a service worker. -->
+  <script src="coi-serviceworker.js"></script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #08080e;
+      --surface:  #0f0f1a;
+      --border:   #1e1e30;
+      --accent:   #4fc3f7;
+      --accent2:  #81c784;
+      --text:     #e8e8f0;
+      --muted:    #6b7280;
+      --up:       #26d19b;
+      --down:     #f0506e;
+      --mono:     'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      overflow-x: hidden;
+    }
+
+    /* ── HERO ─────────────────────────────────────────── */
+    #hero {
+      position: relative;
+      width: 100vw;
+      height: 100svh;
+      min-height: 500px;
+      overflow: hidden;
+    }
+
+    #chart-gpu, #chart-hud {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #chart-hud { pointer-events: none; }
+
+    /* top bar */
+    #hero-header {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 24px;
+      background: linear-gradient(to bottom, rgba(8,8,14,0.9) 0%, transparent 100%);
+    }
+
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.15em;
+      color: var(--text);
+    }
+    .brand span { color: var(--accent); }
+
+    .badge {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      padding: 3px 8px;
+      opacity: 0.85;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 20px;
+    }
+    .nav-links a {
+      font-size: 13px;
+      color: var(--muted);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .nav-links a:hover { color: var(--text); }
+
+    /* bottom-left overlay */
+    #hero-stats {
+      position: absolute;
+      bottom: 64px;
+      left: 24px;
+      z-index: 10;
+      pointer-events: none;
+    }
+    #hero-tagline {
+      font-size: clamp(28px, 5vw, 56px);
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+      text-shadow: 0 2px 20px rgba(0,0,0,0.8);
+    }
+    #hero-tagline em {
+      font-style: normal;
+      color: var(--accent);
+    }
+    #hero-sub {
+      margin-top: 10px;
+      font-size: clamp(13px, 2vw, 16px);
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    /* live stats chips */
+    #live-stats {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .stat-chip {
+      font-family: var(--mono);
+      font-size: 11px;
+      background: rgba(8,8,14,0.75);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 10px;
+      color: var(--muted);
+      backdrop-filter: blur(4px);
+    }
+    .stat-chip .v { color: var(--accent); font-weight: 600; }
+    #stat-bars.loaded .v { color: var(--up); }
+
+    /* scroll hint */
+    #scroll-hint {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      z-index: 10;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      animation: hint-fade 2s ease-in-out infinite;
+    }
+    @keyframes hint-fade {
+      0%,100% { opacity: 0.3; }
+      50%      { opacity: 0.8; }
+    }
+
+    /* ── SECTIONS ──────────────────────────────────────── */
+    section {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 80px 24px;
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: clamp(24px, 4vw, 40px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+
+    .section-divider {
+      width: 100%;
+      height: 1px;
+      background: var(--border);
+    }
+
+    /* ── PIPELINE ARCHITECTURE ─────────────────────────── */
+    #arch {
+      padding-top: 80px;
+    }
+
+    .pipeline {
+      margin-top: 48px;
+      display: flex;
+      align-items: stretch;
+      gap: 0;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .pipeline-node {
+      flex: 1;
+      min-width: 160px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px 16px;
       position: relative;
     }
-    
-    div.chart .overlay {
-      display: none;
-      position: absolute;
-      left: 10px;
-      top: 10px;
+
+    .pipeline-node + .pipeline-arrow {
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      flex-shrink: 0;
+      color: var(--muted);
+      font-size: 20px;
     }
 
-    canvas.glcanvas {
-      width: 100vw;
-      height: 95vh;
-      margin: 0;
-      padding: 0;
+    .pipeline-node .node-thread {
+      font-family: var(--mono);
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .pipeline-node .node-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .pipeline-node .node-detail {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .pipeline-node .node-tag {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 9px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      margin-top: 8px;
+    }
+    .tag-rust   { background: rgba(247,76,0,0.15); color: #f74c00; border: 1px solid rgba(247,76,0,0.3); }
+    .tag-wgpu   { background: rgba(79,195,247,0.1); color: var(--accent); border: 1px solid rgba(79,195,247,0.3); }
+    .tag-js     { background: rgba(247,220,111,0.1); color: #f7dc6f; border: 1px solid rgba(247,220,111,0.3); }
+    .tag-sab    { background: rgba(129,199,132,0.1); color: var(--accent2); border: 1px solid rgba(129,199,132,0.3); }
+
+    .transport-label {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 0 12px;
+    }
+    .transport-label .tl-arrow {
+      font-size: 18px;
+      color: var(--accent2);
+    }
+    .transport-label .tl-text {
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--muted);
+      text-align: center;
+      white-space: nowrap;
     }
 
-    input {
-      width: 100vw;
-      height: 5vh;
-      margin: 0;
-      padding: 0;
+    /* ── NUMBERS ─────────────────────────────────────────── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-top: 48px;
+    }
+    .metric-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px 20px;
+    }
+    .metric-card .m-val {
+      font-family: var(--mono);
+      font-size: 32px;
+      font-weight: 700;
+      color: var(--accent);
+      line-height: 1;
+    }
+    .metric-card .m-unit {
+      font-size: 14px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+    .metric-card .m-label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    /* ── COMING SOON ──────────────────────────────────────── */
+    #coming-soon {
+      text-align: center;
+    }
+    .coming-soon-inner {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 48px 32px;
+      margin-top: 48px;
+    }
+    .coming-soon-inner h3 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .pkg-name {
+      font-family: var(--mono);
+      color: var(--accent);
+    }
+    .coming-soon-inner p {
+      color: var(--muted);
+      max-width: 480px;
+      margin: 0 auto 24px;
+      line-height: 1.7;
+      font-size: 15px;
+    }
+    .code-preview {
+      background: #0d0d18;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+      text-align: left;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.8;
+      max-width: 520px;
+      margin: 0 auto;
+      overflow-x: auto;
+    }
+    .code-preview .kw  { color: #c678dd; }
+    .code-preview .fn  { color: #61afef; }
+    .code-preview .str { color: #98c379; }
+    .code-preview .cm  { color: #5c6370; font-style: italic; }
+    .code-preview .tag { color: #e06c75; }
+    .code-preview .attr { color: #d19a66; }
+
+    .notify-form {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+    .notify-form input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 16px;
+      color: var(--text);
+      font-size: 14px;
+      width: 260px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .notify-form input:focus { border-color: var(--accent); }
+    .btn {
+      background: var(--accent);
+      color: #08080e;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-outline:hover { border-color: var(--text); opacity: 1; }
+
+    /* ── FOOTER ──────────────────────────────────────────── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: gap;
+      gap: 12px;
+    }
+    footer .brand { font-size: 14px; }
+    footer p {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: color 0.15s;
+    }
+    footer a:hover { color: var(--text); }
+
+    /* GitHub icon */
+    .icon-github {
+      width: 20px; height: 20px;
+    }
+
+    /* loading overlay */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      transition: opacity 0.4s;
+    }
+    #loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .loader-brand {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      color: var(--text);
+    }
+    .loader-brand span { color: var(--accent); }
+    .loader-msg {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .loader-bar-outer {
+      width: 240px;
+      height: 2px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .loader-bar-inner {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+      width: 0%;
+      transition: width 0.3s ease-out;
+    }
+    #loader-count {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
     }
   </style>
 </head>
-
 <body>
-  <div class="chart">
-    <canvas class="glcanvas"></canvas>
-    <script type="module" src="./src/demo/client.ts"></script>
+
+<!-- ────────────────────── Loading overlay ──────────────────────────────── -->
+<div id="loading-overlay">
+  <p class="loader-brand">MO<span>CHART</span></p>
+  <div class="loader-bar-outer"><div class="loader-bar-inner" id="loader-bar"></div></div>
+  <p class="loader-msg">Initializing Rust WASM + WebGPU…</p>
+  <p id="loader-count"></p>
+</div>
+
+<!-- ────────────────────── HERO ──────────────────────────────────────────── -->
+<div id="hero">
+  <canvas id="chart-gpu"></canvas>
+  <canvas id="chart-hud"></canvas>
+
+  <header id="hero-header">
+    <span class="brand">MO<span>CHART</span></span>
+    <nav class="nav-links">
+      <a href="#arch">Architecture</a>
+      <a href="#coming-soon">Coming soon</a>
+      <a href="https://github.com/monapochi/monchart" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+    <span class="badge">WebGPU + Rust WASM</span>
+  </header>
+
+  <div id="hero-stats">
+    <div id="hero-tagline">
+      <em id="bar-count-hero">1,000,000</em> bars.<br>60fps. Zero GC.
+    </div>
+    <p id="hero-sub">A financial charting library for the modern web.</p>
   </div>
 
-  <div id="viewport"></div>
-</body>
+  <div id="live-stats">
+    <div class="stat-chip" id="stat-bars">
+      bars: <span class="v" id="stat-bars-val">loading…</span>
+    </div>
+    <div class="stat-chip">
+      fps: <span class="v" id="stat-fps-val">—</span>
+    </div>
+    <div class="stat-chip">
+      render: <span class="v" id="stat-render-val">—</span>
+    </div>
+  </div>
 
+  <p id="scroll-hint">↓ scroll</p>
+</div>
+
+<!-- ────────────────────── NUMBERS ───────────────────────────────────────── -->
+<div class="section-divider"></div>
+<section id="metrics">
+  <p class="section-label">Performance</p>
+  <h2>Built for speed, by design.</h2>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="m-val">1M+</div>
+      <div class="m-unit">bars</div>
+      <div class="m-label">Rendered without breaking a sweat</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">60</div>
+      <div class="m-unit">fps</div>
+      <div class="m-label">Consistent frame rate, even while panning</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">0</div>
+      <div class="m-unit">GC pauses</div>
+      <div class="m-label">Zero allocations on the hot rendering path</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">&lt;50</div>
+      <div class="m-unit">KB gzip</div>
+      <div class="m-label">Core bundle target — no framework dependency</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">6ns</div>
+      <div class="m-unit">FFI</div>
+      <div class="m-label">WASM ↔ JS boundary via shared memory, not copy</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">1</div>
+      <div class="m-unit">GPU draw call</div>
+      <div class="m-label">Instanced rendering — entire chart in one command</div>
+    </div>
+  </div>
+</section>
+
+<!-- ────────────────────── ARCHITECTURE ──────────────────────────────────── -->
+<div class="section-divider"></div>
+<section id="arch">
+  <p class="section-label">Architecture</p>
+  <h2>Shared-Memory Parallel Pipeline</h2>
+  <p style="color:var(--muted); margin-top:12px; max-width:640px; line-height:1.7; font-size:15px;">
+    Three threads collaborate via <strong style="color:var(--text)">SharedArrayBuffer</strong>,
+    with zero serialization overhead per frame.
+    The main thread never touches a canvas; all rendering is off the critical path.
+  </p>
+
+  <div class="pipeline">
+    <!-- Node 1: Main Thread -->
+    <div class="pipeline-node">
+      <div class="node-thread">Main Thread</div>
+      <div class="node-title">chart_host</div>
+      <div class="node-detail">
+        DOM events<br>
+        Viewport state<br>
+        Atomics.notify
+      </div>
+      <span class="node-tag tag-js">JS only</span>
+    </div>
+
+    <div class="transport-label">
+      <span class="tl-arrow">→</span>
+      <span class="tl-text">SAB ctrl<br>64B</span>
+    </div>
+
+    <!-- Node 2: Data Worker -->
+    <div class="pipeline-node">
+      <div class="node-thread">Data Worker</div>
+      <div class="node-title">OhlcvStore<br>+ ExecutionPlan</div>
+      <div class="node-detail">
+        Decompress view<br>
+        SIMD indicators<br>
+        Write FDB header
+      </div>
+      <span class="node-tag tag-rust">Rust WASM</span>
+    </div>
+
+    <div class="transport-label">
+      <span class="tl-arrow">→</span>
+      <span class="tl-text">Shared mem<br>zero-copy</span>
+    </div>
+
+    <!-- Node 3: Render Worker -->
+    <div class="pipeline-node">
+      <div class="node-thread">Render Worker</div>
+      <div class="node-title">WebGPU<br>Renderer</div>
+      <div class="node-detail">
+        OffscreenCanvas<br>
+        Instanced draw<br>
+        MSAA + HUD
+      </div>
+      <span class="node-tag tag-wgpu">WebGPU</span>
+    </div>
+  </div>
+
+  <p style="color:var(--muted); font-size:12px; margin-top:16px; font-family:var(--mono);">
+    Data Worker writes directly into the WASM linear memory region that Render Worker reads via
+    <code style="color:var(--accent)">queue.writeBuffer(sharedMem, ptr, len)</code> — no copy, no serialization.
+  </p>
+</section>
+
+<!-- ────────────────────── COMING SOON ───────────────────────────────────── -->
+<div class="section-divider"></div>
+<section id="coming-soon">
+  <p class="section-label">What's next</p>
+  <h2>Framework wrappers, coming soon.</h2>
+
+  <div class="coming-soon-inner">
+    <h3>
+      <span class="pkg-name">@mochart/react</span>
+    </h3>
+    <p>
+      A thin, zero-overhead wrapper for React 18+.<br>
+      Strict Mode safe. SSR-ready. Hooks &amp; declarative component API.
+    </p>
+
+    <div class="code-preview">
+<span class="kw">import</span> { <span class="fn">Chart</span>, <span class="fn">CandlestickSeries</span>, <span class="fn">Indicator</span> } <span class="kw">from</span> <span class="str">'@mochart/react'</span>;<br>
+<br>
+<span class="kw">function</span> <span class="fn">TradingChart</span>({ data }) {<br>
+&nbsp;&nbsp;<span class="kw">return</span> (<br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;Chart</span> <span class="attr">options</span>={{ width: 800, height: 400 }}<span class="tag">&gt;</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;CandlestickSeries</span> <span class="attr">data</span>={data} <span class="tag">/&gt;</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;Indicator</span> <span class="attr">type</span>=<span class="str">"SMA"</span> <span class="attr">options</span>={{ period: 20 }} <span class="tag">/&gt;</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;Indicator</span> <span class="attr">type</span>=<span class="str">"RSI"</span> <span class="attr">options</span>={{ period: 14 }} <span class="tag">/&gt;</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<span class="tag">&lt;/Chart&gt;</span><br>
+&nbsp;&nbsp;);<br>
+}<br>
+    </div>
+
+    <div style="margin-top: 24px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
+      <a href="https://github.com/monapochi/monchart" target="_blank" rel="noopener" class="btn">
+        ★ Star on GitHub
+      </a>
+      <a href="https://github.com/monapochi/monchart/discussions" target="_blank" rel="noopener" class="btn btn-outline">
+        Join discussion
+      </a>
+    </div>
+  </div>
+
+  <p style="margin-top:16px; text-align:center; color:var(--muted); font-size:13px;">
+    Also planned: <span style="color:var(--text)">@mochart/vue</span> · <span style="color:var(--text)">@mochart/solid</span>
+  </p>
+</section>
+
+<!-- ────────────────────── FOOTER ─────────────────────────────────────────── -->
+<div class="section-divider"></div>
+<footer>
+  <span class="brand">MO<span>CHART</span></span>
+  <p>Built with Rust, WebGPU, and zero compromises.</p>
+  <a href="https://github.com/monapochi/monchart" target="_blank" rel="noopener">
+    <svg class="icon-github" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.44 9.8 8.2 11.38.6.11.82-.26.82-.58v-2.03c-3.34.72-4.04-1.61-4.04-1.61-.54-1.38-1.33-1.75-1.33-1.75-1.09-.74.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 3-.4c1.02 0 2.04.13 3 .4 2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58C20.56 21.8 24 17.3 24 12c0-6.63-5.37-12-12-12z"/>
+    </svg>
+    monapochi/monchart
+  </a>
+</footer>
+
+<!--
+  chart_host_lp.js:
+  - Initialises dual canvas (GPU + HUD)
+  - Spawns DataWorker with { synthetic: true, barCount: 1_000_000 }
+  - Spawns RenderWorker with OffscreenCanvas
+  - Writes viewport SAB on every rAF tick
+-->
+<script type="module" src="demo/chart_host_lp.js"></script>
+
+<script>
+  // Update loading overlay from chart host events
+  window._lpOnReady = (bars) => {
+    const overlay = document.getElementById('loading-overlay');
+    overlay.classList.add('hidden');
+    setTimeout(() => overlay.remove(), 500);
+
+    const barEl = document.getElementById('stat-bars');
+    if (barEl) barEl.classList.add('loaded');
+
+    const barsVal = document.getElementById('stat-bars-val');
+    if (barsVal) barsVal.textContent = bars.toLocaleString();
+
+    const heroCount = document.getElementById('bar-count-hero');
+    if (heroCount) heroCount.textContent = bars.toLocaleString();
+  };
+
+  window._lpOnProgress = (pct, msg) => {
+    const bar = document.getElementById('loader-bar');
+    if (bar) bar.style.width = pct + '%';
+    const loaderMsg = document.querySelector('.loader-msg');
+    if (loaderMsg && msg) loaderMsg.textContent = msg;
+  };
+
+  window._lpOnPerf = (fps, renderMs) => {
+    const fpsEl = document.getElementById('stat-fps-val');
+    if (fpsEl) fpsEl.textContent = fps.toFixed(0);
+    const renderEl = document.getElementById('stat-render-val');
+    if (renderEl) renderEl.textContent = renderMs.toFixed(1) + ' ms';
+  };
+</script>
+</body>
 </html>
