@@ -72,8 +72,7 @@ renderWorker.postMessage(
 dataWorker.postMessage({
   type: 'init',
   ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR,
-  synthetic: false, // Use real market data
-  barCount: 1_000_000, // Replicate real data up to 1M bars for the demo
+  synthetic: false,
   dataFile: '../MSFT.bin',
 });
 

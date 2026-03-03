@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mochart — 1M bars. 60fps. &approx; Zero GC.</title>
-  <meta name="description" content="A financial charting library. WebGPU + Rust WASM delivering extreme performance.">
+  <title>Mochart — 40 Years of MSFT. Rendered in &lt; 2ms.</title>
+  <meta name="description" content="A financial charting library. 40 years of real market data rendered via Rust WASM + WebGPU.">
   <link rel="icon" href="data:,">
-  <meta property="og:title" content="Mochart — 1M bars. 60fps. &approx; Zero GC.">
+  <meta property="og:title" content="Mochart — 40 Years of MSFT. Rendered in &lt; 2ms.">
   <meta property="og:description" content="WebGPU + Rust WASM financial charting. 1,000,000 bars at 60fps.">
 
   <!-- SharedArrayBuffer needs COOP/COEP.
@@ -504,7 +504,7 @@
 
   <div id="hero-stats">
     <div id="hero-tagline">
-      <em id="bar-count-hero">1,000,000</em> bars.<br>60fps. &approx; Zero GC.
+      40 Years of MSFT.<br>Rendered in &lt;&nbsp;2ms.
     </div>
     <p id="hero-sub">A financial charting library for the modern web.</p>
   </div>
@@ -725,9 +725,6 @@
 
     const barsVal = document.getElementById('stat-bars-val');
     if (barsVal) barsVal.textContent = bars.toLocaleString();
-
-    const heroCount = document.getElementById('bar-count-hero');
-    if (heroCount) heroCount.textContent = bars.toLocaleString();
   };
 
   window._lpOnProgress = (pct, msg) => {
