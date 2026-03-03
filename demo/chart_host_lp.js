@@ -52,9 +52,10 @@ const frameCtrl = allocFrameCtrl();
 const indSab    = allocIndSab(EP_ARENA_F32);
 
 // ── Workers ──────────────────────────────────────────────────────────────
-// Worker URLs must resolve relative to this module, not the HTML page.
-const renderWorker = new Worker(new URL('./render_worker.js', import.meta.url), { type: 'module' });
-const dataWorker   = new Worker(new URL('./data_worker.js',   import.meta.url), { type: 'module' });
+// HTMLの場所（window.location.href）から見て解決するように変更
+const getWorkerUrl = (file) => new URL(`demo/${file}`, window.location.href);
+const renderWorker = new Worker(getWorkerUrl('render_worker.js'), { type: 'module' });
+const dataWorker   = new Worker(getWorkerUrl('data_worker.js'), { type: 'module' });
 
 const DPR = Math.ceil(window.devicePixelRatio || 1);
 
