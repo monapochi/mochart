@@ -151,10 +151,11 @@ self.onmessage = async (evt) => {
 
     // 2. Load OHLCV data: synthetic (1M bars) or binary fixture
     const useSynthetic = evt.data.synthetic === true;
+    const dataFile     = evt.data.dataFile || '../MSFT.bin';
     const syntheticN   = (evt.data.barCount | 0) || 1_000_000;
     const { store: s, barCount } = useSynthetic
       ? loadSyntheticOhlcv(syntheticN, wasmMemory)
-      : await loadBinaryOhlcv('/fixtures/MSFT.bin', wasmMemory);
+      : await loadBinaryOhlcv(new URL(dataFile, import.meta.url).href, wasmMemory);
     store     = s;
     totalBars = barCount;
     console.log(`[data_worker] ingested ${barCount} bars`);

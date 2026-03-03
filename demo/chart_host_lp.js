@@ -72,8 +72,8 @@ renderWorker.postMessage(
 dataWorker.postMessage({
   type: 'init',
   ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR,
-  synthetic: true,
-  barCount:  1_000_000,
+  synthetic: false,
+  dataFile: '../MSFT.bin',
 });
 
 // Set default SMA periods to the same values as the demo.
@@ -147,9 +147,9 @@ let touchGesture = /** @type {'none'|'pan'|'zoom'} */ ('none');
 let touchInitDist  = 0;
 let touchInitMidX  = 0;
 
-// LP flags: enable all indicators as a showcase.
+// LP flags: enable all indicators as a showcase (except heatmap, which is cluttered)
 // bit 1=SMA1  2=SMA2  4=SMA3  16=Heatmap  32=RSI  64=MACD  128=Volume
-const LP_FLAGS_DEFAULT = 1 | 2 | 4 | 16 | 32 | 64 | 128;
+const LP_FLAGS_DEFAULT = 1 | 2 | 4 | 32 | 64 | 128; // Removed 16 (Heatmap)
 
 function smaFlags() {
   return LP_FLAGS_DEFAULT | (isAtRightEdge() ? AT_RIGHT_EDGE : 0);
