@@ -52,10 +52,9 @@ const frameCtrl = allocFrameCtrl();
 const indSab    = allocIndSab(EP_ARENA_F32);
 
 // ── Workers ──────────────────────────────────────────────────────────────
-// HTMLの場所（window.location.href）から見て解決するように変更
-const getWorkerUrl = (file) => new URL(`demo/${file}`, window.location.href);
-const renderWorker = new Worker(getWorkerUrl('render_worker.js'), { type: 'module' });
-const dataWorker   = new Worker(getWorkerUrl('data_worker.js'), { type: 'module' });
+// import.meta.url を基準に絶対URL文字列を生成して Worker に渡す (末尾スラッシュ問題の回避)
+const renderWorker = new Worker(new URL('./render_worker.js', import.meta.url).href, { type: 'module' });
+const dataWorker   = new Worker(new URL('./data_worker.js', import.meta.url).href, { type: 'module' });
 
 const DPR = Math.ceil(window.devicePixelRatio || 1);
 
