@@ -52,8 +52,9 @@ const frameCtrl = allocFrameCtrl();
 const indSab    = allocIndSab(EP_ARENA_F32);
 
 // ── Workers ──────────────────────────────────────────────────────────────
-const renderWorker = new Worker('./render_worker.js', { type: 'module' });
-const dataWorker   = new Worker('./data_worker.js',   { type: 'module' });
+// Worker URLs must resolve relative to this module, not the HTML page.
+const renderWorker = new Worker(new URL('./render_worker.js', import.meta.url), { type: 'module' });
+const dataWorker   = new Worker(new URL('./data_worker.js',   import.meta.url), { type: 'module' });
 
 const DPR = Math.ceil(window.devicePixelRatio || 1);
 
