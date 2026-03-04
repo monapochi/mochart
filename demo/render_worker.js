@@ -20,6 +20,7 @@ import {
   STRIDE, WAKE, READY, DIRTY, GPU_DIRTY, HUD_DIRTY,
   PLOT_W, PLOT_H, POINTER_X, POINTER_Y,
   i32ToF32,
+  FRAME_MAX_BARS,
   FBUF_HDR_BYTES,
   FBUF_VIEW_LEN, FBUF_VIS_BARS, FBUF_START_BAR,
   FBUF_CANVAS_W, FBUF_CANVAS_H,
@@ -102,6 +103,16 @@ function isoDateStr(ms) {
 /** @type {DataView} */                            let fdbHdr;
 /** @type {GpuRenderer} */                         let gpuRenderer;
 
+// ── Pre-allocated SoA views on frameBuf (FRAME_MAX_BARS capacity) ─────────
+// Created once at init; used for tooltip OHLCV reads and date axis.
+// Avoids 6× per-hover + 1× per-frame TypedArray allocation in the rAF loop.
+/** @type {Float32Array} */ let _fbOpen;
+/** @type {Float32Array} */ let _fbHigh;
+/** @type {Float32Array} */ let _fbLow;
+/** @type {Float32Array} */ let _fbClose;
+/** @type {Float32Array} */ let _fbVol;
+/** @type {Float64Array} */ let _fbTime;
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 // Reusable object to avoid garbage collection on pointer hover
 const _popupData = { open: 0, high: 0, low: 0, close: 0, vol: 0, sma20: 0, sma50: 0, sma100: 0 };
@@ -115,6 +126,9 @@ let _smaArenaOff = [0, 0, 0];       // arena f32 offset for SMA1, SMA2, SMA3
 let _smaBarCount = [0, 0, 0];       // bar_count per SMA (for bounds check)
 let _smaCachedRevision = -1;
 /** @type {SharedArrayBuffer|null} */ let _indSabRef = null;
+/** @type {DataView|null} */          let _indSabHdr = null;  // cached DataView on indSab header
+/** @type {Float32Array|null} */      let _indArenaView = null;  // cached max-capacity arena view
+/** @type {number} */                 let _indArenaViewLen = 0;  // current cached arena capacity
 
 /**
  * Read SMA values at bar index `idx` from the EP arena in indSab.
@@ -123,8 +137,8 @@ let _smaCachedRevision = -1;
  * @param {number} idx bar index within the visible window
  */
 function _readSmaPop(idx) {
-  if (!_indSabRef) { _popupData.sma20 = NaN; _popupData.sma50 = NaN; _popupData.sma100 = NaN; return; }
-  const hdr = new DataView(_indSabRef);
+  if (!_indSabRef || !_indSabHdr) { _popupData.sma20 = NaN; _popupData.sma50 = NaN; _popupData.sma100 = NaN; return; }
+  const hdr = _indSabHdr;
   const rev = hdr.getUint32(12, true);  // INDSAB_REVISION
   // Refresh cached offsets on revision change
   if (rev !== _smaCachedRevision) {
@@ -148,12 +162,16 @@ function _readSmaPop(idx) {
       }
     }
   }
-  // Read values from arena section of indSab
+  // Read values from arena section of indSab using cached view.
+  // Re-create _indArenaView only when arena length grows (rare: plan recompile).
   const arenaLen = hdr.getUint32(INDSAB_ARENA_LEN, true);
-  const arenaView = new Float32Array(_indSabRef, INDSAB_ARENA_OFF, arenaLen);
-  _popupData.sma20  = (idx < _smaBarCount[0] && _smaArenaOff[0] + idx < arenaLen) ? arenaView[_smaArenaOff[0] + idx] : NaN;
-  _popupData.sma50  = (idx < _smaBarCount[1] && _smaArenaOff[1] + idx < arenaLen) ? arenaView[_smaArenaOff[1] + idx] : NaN;
-  _popupData.sma100 = (idx < _smaBarCount[2] && _smaArenaOff[2] + idx < arenaLen) ? arenaView[_smaArenaOff[2] + idx] : NaN;
+  if (!_indArenaView || arenaLen > _indArenaViewLen) {
+    _indArenaView = new Float32Array(_indSabRef, INDSAB_ARENA_OFF, arenaLen);
+    _indArenaViewLen = arenaLen;
+  }
+  _popupData.sma20  = (idx < _smaBarCount[0] && _smaArenaOff[0] + idx < arenaLen) ? _indArenaView[_smaArenaOff[0] + idx] : NaN;
+  _popupData.sma50  = (idx < _smaBarCount[1] && _smaArenaOff[1] + idx < arenaLen) ? _indArenaView[_smaArenaOff[1] + idx] : NaN;
+  _popupData.sma100 = (idx < _smaBarCount[2] && _smaArenaOff[2] + idx < arenaLen) ? _indArenaView[_smaArenaOff[2] + idx] : NaN;
 }
 
 self.onmessage = async (evt) => {
@@ -191,14 +209,25 @@ self.onmessage = async (evt) => {
   frameBuf   = fsBuf;
   fdbHdr     = new DataView(fsBuf, 0, FBUF_HDR_BYTES);
 
+  // Pre-allocate max-capacity SoA views on frameBuf (created once, used every hover/frame)
+  _fbOpen  = new Float32Array(fsBuf, FBUF_OPEN_OFF,  FRAME_MAX_BARS);
+  _fbHigh  = new Float32Array(fsBuf, FBUF_HIGH_OFF,  FRAME_MAX_BARS);
+  _fbLow   = new Float32Array(fsBuf, FBUF_LOW_OFF,   FRAME_MAX_BARS);
+  _fbClose = new Float32Array(fsBuf, FBUF_CLOSE_OFF, FRAME_MAX_BARS);
+  _fbVol   = new Float32Array(fsBuf, FBUF_VOL_OFF,   FRAME_MAX_BARS);
+  _fbTime  = new Float64Array(fsBuf, FBUF_TIME_OFF,  FRAME_MAX_BARS);
+
   try {
     gpuRenderer = new GpuRenderer();
     gpuRenderer.dpr = DPR;
     const { format } = await gpuRenderer.init(gpuCanvas);
+    // Pre-allocate SoA views on frameBuf for zero-alloc GPU upload
+    gpuRenderer.setFrameBufViews(fsBuf);
     // Wire up EP indicator arena if data_worker provides one
     if (indSab) {
       gpuRenderer.setIndSab(indSab);
-      _indSabRef = indSab;  // cache for _readSmaPop tooltip helper
+      _indSabRef = indSab;              // cache for _readSmaPop tooltip helper
+      _indSabHdr = new DataView(indSab); // single DataView, reused every hover
     }
     hud = hudCanvas.getContext('2d');
     if (!hud) throw new Error('Failed to get Canvas 2D context');
@@ -211,15 +240,22 @@ self.onmessage = async (evt) => {
 };
 
 // ── Render loop ───────────────────────────────────────────────────────────────
-async function renderLoop() {
+function renderLoop() {
   let lastFrameReadyVal = 0;
   const hudHasCommit = typeof hud.commit === 'function';
   let firstFrame = true;
 
-  while (true) {
-    // Wait for data_worker to signal a new frame
-    await Atomics.waitAsync(frameCtrl, FCTRL_READY, lastFrameReadyVal).value;
-    lastFrameReadyVal = Atomics.load(frameCtrl, FCTRL_READY);
+  function renderFrame() {
+    if (self.requestAnimationFrame) {
+      self.requestAnimationFrame(renderFrame);
+    } else {
+      setTimeout(renderFrame, 16);
+    }
+
+    // Check if data_worker produced a new frame
+    const currentReadyVal = Atomics.load(frameCtrl, FCTRL_READY);
+    if (currentReadyVal === lastFrameReadyVal) return;
+    lastFrameReadyVal = currentReadyVal;
 
     // Read FDB header
     const viewLen = fdbHdr.getUint32 (FBUF_VIEW_LEN, true);
@@ -232,7 +268,10 @@ async function renderLoop() {
     const gpuDirty  = (dirtyBits & GPU_DIRTY) !== 0;
     const hudDirty  = (dirtyBits & HUD_DIRTY)  !== 0;
 
-    if (viewLen < 1 || physW < 4 || physH < 4) continue;
+    if (viewLen < 1 || physW < 4 || physH < 4) {
+      Atomics.store(frameCtrl, FCTRL_ACK, lastFrameReadyVal);
+      return;
+    }
 
     // Resize if needed
     if (gpuCanvas.width !== physW || gpuCanvas.height !== physH) {
@@ -287,12 +326,12 @@ async function renderLoop() {
             let dateLabel = '';
             let popupData = null;
             if (viewLen > 0 && lIdx < viewLen) {
-              dateLabel = isoDateStr(new Float64Array(frameBuf, FBUF_TIME_OFF, viewLen)[lIdx]);
-              _popupData.open = new Float32Array(frameBuf, FBUF_OPEN_OFF, viewLen)[lIdx];
-              _popupData.high = new Float32Array(frameBuf, FBUF_HIGH_OFF, viewLen)[lIdx];
-              _popupData.low = new Float32Array(frameBuf, FBUF_LOW_OFF, viewLen)[lIdx];
-              _popupData.close = new Float32Array(frameBuf, FBUF_CLOSE_OFF, viewLen)[lIdx];
-              _popupData.vol = new Float32Array(frameBuf, FBUF_VOL_OFF, viewLen)[lIdx];
+              dateLabel = isoDateStr(_fbTime[lIdx]);
+              _popupData.open  = _fbOpen[lIdx];
+              _popupData.high  = _fbHigh[lIdx];
+              _popupData.low   = _fbLow[lIdx];
+              _popupData.close = _fbClose[lIdx];
+              _popupData.vol   = _fbVol[lIdx];
               // SMA values read from EP arena (no legacy frameBuf SMA channels)
               _readSmaPop(lIdx);
               popupData = _popupData;
@@ -334,6 +373,8 @@ async function renderLoop() {
     }
     Atomics.store(frameCtrl, FCTRL_ACK, lastFrameReadyVal);
   }
+  
+  renderFrame();
 }
 
 // ── HUD drawing helpers ───────────────────────────────────────────────────────
@@ -374,7 +415,8 @@ function drawPriceAxis(ctx, w, h, yMin, yMax, layout) {
 function drawDateAxis(ctx, w, h, viewLen) {
   if (viewLen === 0) return;
   const plotW = w - 60;
-  const times = new Float64Array(frameBuf, FBUF_TIME_OFF, viewLen);
+  // Use pre-allocated _fbTime view (FRAME_MAX_BARS capacity) — zero alloc
+  const times = _fbTime;
   ctx.save();
   ctx.font = '11px monospace';
   ctx.fillStyle = '#888';
@@ -493,7 +535,6 @@ function formatVolume(v) {
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
   if (v >= 1e3) return (v / 1e3).toFixed(2) + 'K';
   return v.toString();
-  ctx.restore();
 }
 
 function drawPaneBorders(ctx, plotW, layout) {

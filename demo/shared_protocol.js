@@ -100,19 +100,34 @@ export function allocCtrlBuf(n = 1) {
 /** Maximum visible bars supported (must equal or exceed any visBars value). */
 export const FRAME_MAX_BARS = 4096;
 
-// ── FDB header byte offsets (u32 / f32 fields, 4 bytes each) ─────────────
+// ── FDB header byte offsets (128B, #[repr(C, align(16))]) ─────────────────
+// Must match Rust FrameDescriptor layout in store.rs exactly.
+// vec4<u32> #0 (bytes 0-15)
 export const FBUF_START_BAR  =  0;  // u32 — first visible bar index
 export const FBUF_VIS_BARS   =  4;  // u32 — requested visible bar count
 export const FBUF_VIEW_LEN   =  8;  // u32 — actual decompressed bar count
-export const FBUF_PRICE_MIN  = 12;  // f32 — view_price_min()
-export const FBUF_PRICE_MAX  = 16;  // f32 — view_price_max()
-export const FBUF_CANVAS_W   = 20;  // f32 — physical canvas width (px)
-export const FBUF_CANVAS_H   = 24;  // f32 — physical canvas height (px)
-export const FBUF_CANDLE_W   = 28;  // f32 — candle body width (px)
-export const FBUF_FLAGS      = 32;  // u32 — indicator toggle flags
+export const FBUF_FLAGS      = 12;  // u32 — indicator toggle flags
+// vec4<u32> #1 (bytes 16-31) — WASM view pointers (internal, not read by JS)
+// view_open_ptr=16, view_high_ptr=20, view_low_ptr=24, view_close_ptr=28
+// vec4<u32> #2 (bytes 32-47)
+// view_vol_ptr=32
 export const FBUF_SEQ        = 36;  // u32 — monotone frame counter
 export const FBUF_TOTAL_BARS = 40;  // u32 — store.len() (total ingested bars)
-// bytes 44-127 reserved
+// _pad0=44
+// vec4<f32> #3 (bytes 48-63)
+export const FBUF_PRICE_MIN  = 48;  // f32 — view_price_min()
+export const FBUF_PRICE_MAX  = 52;  // f32 — view_price_max()
+export const FBUF_CANVAS_W   = 56;  // f32 — physical canvas width (px)
+export const FBUF_CANVAS_H   = 60;  // f32 — physical canvas height (px)
+// vec4<f32/u32> #4 (bytes 64-79)
+export const FBUF_CANDLE_W   = 64;  // f32 — candle body width (px)
+export const FBUF_DPR        = 68;  // f32 — device pixel ratio
+export const FBUF_CACHE_VALID = 72; // u32 — bitmask of valid caches
+export const FBUF_DIRTY_START = 76; // u32 — dirty range start bar
+// vec4<u32> #5 (bytes 80-95)
+export const FBUF_DIRTY_END      = 80;  // u32 — dirty range end bar
+export const FBUF_INDICATOR_GEN  = 84;  // u32 — indicator generation counter
+// bytes 88-127 reserved
 
 export const FBUF_HDR_BYTES = 128;
 

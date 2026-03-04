@@ -89,6 +89,10 @@ export class GpuRenderer {
   // Per-cmd uniform buffer pool (one 80B GPUBuffer per visible indicator cmd).
   // Grown lazily to MAX_RENDER_CMDS; never shrunk to avoid GC churn.
   /** @type {GPUBuffer[]} */     _uniPool        = [];
+  // Pre-allocated draw descriptor pool (avoids per-frame array + object alloc).
+  /** @type {Array<{pipeline:GPURenderPipeline|null, uniBufIdx:number, uniSize:number, drawCount:number, vpY:number, vpH:number}>} */
+  _drawPool = Array.from({ length: 32 }, () => ({ pipeline: null, uniBufIdx: 0, uniSize: 0, drawCount: 0, vpY: 0, vpH: 0 }));
+  _drawCount = 0;
   // indSAB reference (set by setIndSab; render_worker transfers on init)
   /** @type {SharedArrayBuffer|null} */ indSab        = null;
   /** @type {DataView|null}           */ _indHdrView   = null;
@@ -100,13 +104,30 @@ export class GpuRenderer {
   
   // ── Reusable CPU buffers for Uniform uploads (avoid per-frame allocation) ──
   _cpData = new Uint32Array(4);       // computeParamBuf (16B)
+  _mmInit = new Uint32Array([0x00000000, 0x7F7FFFFF, 0, 0]);  // mmBuf reset
   _candleUbuf = new ArrayBuffer(96);  // candleUniBuf (96B)
+  _candleUbufDv = new DataView(this._candleUbuf);  // DataView on _candleUbuf
   _candleUbufF32 = new Float32Array(this._candleUbuf);
   _candleUbufU32 = new Uint32Array(this._candleUbuf);
   _lineUbuf = new ArrayBuffer(64);    // lineUniBuf (64B)
+  _lineUbufDv = new DataView(this._lineUbuf);  // DataView on _lineUbuf
   _vpParamsBuf = new ArrayBuffer(32); // vpParamsBuf (32B)
+  _vpParamsDv = new DataView(this._vpParamsBuf);  // DataView on _vpParamsBuf
   _vpRenderUbuf = new ArrayBuffer(48);// vpRenderUniforms (48B)
+  _vpRenderDv = new DataView(this._vpRenderUbuf);  // DataView on _vpRenderUbuf
   _indUniBuf = new ArrayBuffer(80);   // EP indicator uniform (80B = max of all shader types)
+  _indUniBufDv = new DataView(this._indUniBuf);  // DataView on _indUniBuf
+
+  // ── Cached arena view for indSab GPU upload ──
+  /** @type {Float32Array|null} */ _indArenaView = null;
+  /** @type {number} */            _indArenaViewCap = 0;
+
+  // ── Pre-allocated SoA views on frameBuf for GPU upload (set by setFrameBuf) ──
+  /** @type {Float32Array|null} */ _fbOpen  = null;
+  /** @type {Float32Array|null} */ _fbHigh  = null;
+  /** @type {Float32Array|null} */ _fbLow   = null;
+  /** @type {Float32Array|null} */ _fbClose = null;
+  /** @type {Float32Array|null} */ _fbVol   = null;
 
   // Timestamp query resources
   /** @type {GPUQuerySet|null} */ timestampQuerySet = null;
@@ -314,14 +335,23 @@ export class GpuRenderer {
       this.storageBufSize = storageNeeded;
     }
 
-    // Upload SoA channels from frameBuf (SAB) to storage buffer
-    // queue.writeBuffer accepts SharedArrayBuffer via TypedArray views in Chrome
+    // Upload SoA channels from frameBuf (SAB) to storage buffer.
+    // Uses pre-allocated max-capacity views (created once in setFrameBufViews).
     const stride = viewLen * 4;
-    queue.writeBuffer(this.storageBuf,    0, new Float32Array(frameBuf, FBUF_OPEN_OFF,  viewLen));
-    queue.writeBuffer(this.storageBuf, stride, new Float32Array(frameBuf, FBUF_HIGH_OFF,  viewLen));
-    queue.writeBuffer(this.storageBuf, stride * 2, new Float32Array(frameBuf, FBUF_LOW_OFF,   viewLen));
-    queue.writeBuffer(this.storageBuf, stride * 3, new Float32Array(frameBuf, FBUF_CLOSE_OFF, viewLen));
-    queue.writeBuffer(this.storageBuf, stride * 4, new Float32Array(frameBuf, FBUF_VOL_OFF,   viewLen));
+    if (this._fbOpen) {
+      queue.writeBuffer(this.storageBuf,          0, this._fbOpen,  0, viewLen);
+      queue.writeBuffer(this.storageBuf,     stride, this._fbHigh,  0, viewLen);
+      queue.writeBuffer(this.storageBuf, stride * 2, this._fbLow,   0, viewLen);
+      queue.writeBuffer(this.storageBuf, stride * 3, this._fbClose, 0, viewLen);
+      queue.writeBuffer(this.storageBuf, stride * 4, this._fbVol,   0, viewLen);
+    } else {
+      // Fallback: create views on the fly (first frame before setFrameBufViews)
+      queue.writeBuffer(this.storageBuf,          0, new Float32Array(frameBuf, FBUF_OPEN_OFF,  viewLen));
+      queue.writeBuffer(this.storageBuf,     stride, new Float32Array(frameBuf, FBUF_HIGH_OFF,  viewLen));
+      queue.writeBuffer(this.storageBuf, stride * 2, new Float32Array(frameBuf, FBUF_LOW_OFF,   viewLen));
+      queue.writeBuffer(this.storageBuf, stride * 3, new Float32Array(frameBuf, FBUF_CLOSE_OFF, viewLen));
+      queue.writeBuffer(this.storageBuf, stride * 4, new Float32Array(frameBuf, FBUF_VOL_OFF,   viewLen));
+    }
 
     // Upload CPU-precomputed SMA values from frameBuf (SAB) into GPU buffers.
     // Skipped when the EP pipeline is active (indSab set) — the arena carries
@@ -342,8 +372,7 @@ export class GpuRenderer {
       });
     }
     // Reset: max_init=0.0 (0x00000000), min_init=f32::MAX (0x7F7FFFFF)
-    const mmInit = new Uint32Array([0x00000000, 0x7F7FFFFF, 0, 0]);
-    queue.writeBuffer(this.mmBuf, 0, mmInit);
+    queue.writeBuffer(this.mmBuf, 0, this._mmInit);
 
     // ── 3. Compute params buffer (16B uniform) ────────────────────────────
     if (!this.computeParamBuf) {
@@ -354,8 +383,8 @@ export class GpuRenderer {
       });
     }
     // { total_len, start_index=0, visible_count, _pad }
-    const cpData = new Uint32Array([viewLen, 0, viewLen, 0]);
-    queue.writeBuffer(this.computeParamBuf, 0, cpData);
+    this._cpData[0] = viewLen; this._cpData[1] = 0; this._cpData[2] = viewLen; this._cpData[3] = 0;
+    queue.writeBuffer(this.computeParamBuf, 0, this._cpData);
 
     // ── 4. Candle uniform buffer (96B) ─────────────────────────────────────
     if (!this.candleUniBuf) {
@@ -365,8 +394,7 @@ export class GpuRenderer {
       });
     }
     {
-      const b = new ArrayBuffer(96);
-      const v = new DataView(b);
+      const v = this._candleUbufDv;
       v.setFloat32( 0, plotW,   true);  // pw
       v.setFloat32( 4, candleW, true);  // cw
       v.setUint32 ( 8, viewLen, true);  // total_len
@@ -387,7 +415,7 @@ export class GpuRenderer {
       // border_color: same as wick
       v.setFloat32(80, 0.39, true); v.setFloat32(84, 0.39, true);
       v.setFloat32(88, 0.39, true); v.setFloat32(92, 1.00, true);
-      queue.writeBuffer(this.candleUniBuf, 0, b);
+      queue.writeBuffer(this.candleUniBuf, 0, this._candleUbuf);
     }
 
     // ── 5. Encode: compute pass + candle render pass ──────────────────────
@@ -485,10 +513,9 @@ export class GpuRenderer {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    // Pack 64B line uniforms
+    // Pack 64B line uniforms (reuse pre-allocated _lineUbuf)
     {
-      const b = new ArrayBuffer(64);
-      const v = new DataView(b);
+      const v = this._lineUbufDv;
       v.setFloat32( 0, plotW,       true);  // plot_w
       v.setFloat32( 4, plotH,       true);  // plot_h
       v.setFloat32( 8, candleW,     true);  // candle_w
@@ -503,7 +530,7 @@ export class GpuRenderer {
       v.setUint32 (52, nanStart, true);  // nan_start (warmup bars clipped)
       v.setUint32 (56, visBc,    true);  // slots (_pad2)
       v.setUint32 (60, 0,        true);
-      queue.writeBuffer(this.lineUniBuf, 0, b);
+      queue.writeBuffer(this.lineUniBuf, 0, this._lineUbuf);
     }
 
     const lineBGL = this.linePipeline.getBindGroupLayout(0);
@@ -557,7 +584,7 @@ export class GpuRenderer {
     }
 
     const ubuf = this._vpRenderUbuf;
-    const dv = new DataView(ubuf);
+    const dv = this._vpRenderDv;
     dv.setFloat32(0, plotW, true);
     dv.setFloat32(4, plotH, true);
     dv.setUint32(8, numBins, true);
@@ -613,6 +640,20 @@ export class GpuRenderer {
     this._indHdrView = new DataView(sab);
     // Tier 3: destroy legacy SMA GPU resources — EP arena carries all indicator data
     this._destroyLegacyResources();
+  }
+
+  /**
+   * Create pre-allocated max-capacity SoA views on frameBuf.
+   * Called once at init by render_worker; views are reused every drawGpu frame.
+   * Eliminates 5× `new Float32Array(frameBuf, ...)` per frame for queue.writeBuffer.
+   * @param {SharedArrayBuffer} fbuf
+   */
+  setFrameBufViews(fbuf) {
+    this._fbOpen  = new Float32Array(fbuf, FBUF_OPEN_OFF,  FRAME_MAX_BARS);
+    this._fbHigh  = new Float32Array(fbuf, FBUF_HIGH_OFF,  FRAME_MAX_BARS);
+    this._fbLow   = new Float32Array(fbuf, FBUF_LOW_OFF,   FRAME_MAX_BARS);
+    this._fbClose = new Float32Array(fbuf, FBUF_CLOSE_OFF, FRAME_MAX_BARS);
+    this._fbVol   = new Float32Array(fbuf, FBUF_VOL_OFF,   FRAME_MAX_BARS);
   }
 
   /**
@@ -786,17 +827,20 @@ export class GpuRenderer {
     const { device } = this;
     const queue = device.queue;
 
-    // Upload arena from indSAB to GPU (single writeBuffer for all indicators)
+    // Upload arena from indSAB to GPU (single writeBuffer for all indicators).
+    // Re-create cached arena view only when length grows (rare: plan recompile).
     this._ensureArenaGpuBuf(arenaLen);
-    queue.writeBuffer(
-      this.arenaGpuBuf, 0,
-      new Float32Array(this.indSab, INDSAB_ARENA_OFF, arenaLen),
-    );
+    if (!this._indArenaView || arenaLen > this._indArenaViewCap) {
+      this._indArenaView = new Float32Array(this.indSab, INDSAB_ARENA_OFF, arenaLen);
+      this._indArenaViewCap = arenaLen;
+    }
+    queue.writeBuffer(this.arenaGpuBuf, 0, this._indArenaView, 0, arenaLen);
 
     // ── Phase 1: collect visible commands, write per-cmd uniforms ──────────
     // Each cmd needs its own GPUBuffer (different arena_offset / colors per pass).
-    const dv = new DataView(this._indUniBuf);
-    const draws = [];  // { pipeline, uniBufIdx, uniSize, drawCount }
+    const dv = this._indUniBufDv;
+    // Reuse pre-allocated draw descriptor pool (avoids per-frame array + object alloc)
+    const draws = this._drawPool;
     let poolIdx = 0;
 
     for (let ci = 0; ci < cmdCount; ci++) {
@@ -858,12 +902,13 @@ export class GpuRenderer {
       // Ensure pool slot and write uniforms
       this._ensureUniPool(poolIdx + 1);
       queue.writeBuffer(this._uniPool[poolIdx], 0, this._indUniBuf, 0, uniSize);
-      draws.push({ pipeline, uniBufIdx: poolIdx, uniSize, drawCount,
-                   vpY: paneRegion.y, vpH: paneRegion.h });
+      const d = draws[poolIdx];
+      d.pipeline = pipeline; d.uniBufIdx = poolIdx; d.uniSize = uniSize;
+      d.drawCount = drawCount; d.vpY = paneRegion.y; d.vpH = paneRegion.h;
       poolIdx++;
     }
 
-    if (draws.length === 0) return;
+    if (poolIdx === 0) return;
 
     // ── Phase 2: single render pass, N draws (PLAN §4.3 / §8) ────────────
     // One beginRenderPass → N × (setPipeline + setViewport + setBindGroup + draw)
@@ -876,7 +921,8 @@ export class GpuRenderer {
     const pass     = encoder.beginRenderPass({
       colorAttachments: [{ view: swapView, loadOp: 'load', storeOp: 'store' }],
     });
-    for (const { pipeline, uniBufIdx, uniSize, drawCount, vpY, vpH } of draws) {
+    for (let di = 0; di < poolIdx; di++) {
+      const { pipeline, uniBufIdx, uniSize, drawCount, vpY, vpH } = draws[di];
       const uniBuf = this._uniPool[uniBufIdx];
       const bgl0   = pipeline.getBindGroupLayout(0);
       const bgl1   = pipeline.getBindGroupLayout(1);
@@ -1064,7 +1110,7 @@ export class GpuRenderer {
 
     // params buffer: total_len, start_index, visible_count, num_bins, price_min(f32), price_max(f32)
     const pbuf = this._vpParamsBuf;
-    const dv = new DataView(pbuf);
+    const dv = this._vpParamsDv;
     dv.setUint32(0, viewLen, true);
     dv.setUint32(4, 0, true);
     dv.setUint32(8, viewLen, true);

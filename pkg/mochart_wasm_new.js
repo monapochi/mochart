@@ -741,7 +741,7 @@ export class OhlcvStore {
      * - `flags`:   ビットマスク（SMA20=1, SMA50=2, SMA100=4 など）
      *
      * # Safety (internal)
-     * `FDB_U32` は WASM 単一スレッドでのみ変更される `static mut` 配列。
+     * `FDB_ALIGNED` は WASM 単一スレッドでのみ変更される `static mut` 構造体。
      * 再帰呼び出しはなく、並行書き込みも発生しない。
      * @param {number} canvas_w
      * @param {number} canvas_h
@@ -787,7 +787,7 @@ export class OhlcvStore {
         return ret >>> 0;
     }
     /**
-     * View Window 内の high の最大値をスキャンして返す（ゼロアロケーション、Rustフォールバック）
+     * View Window 内の high の最大値をスキャンして返す（ゼロアロケーション、SIMD向け4-wideリダクション）
      * `decompress_view_window()` の呼び出し後に使用すること。
      * @returns {number}
      */
@@ -796,8 +796,14 @@ export class OhlcvStore {
         return ret;
     }
     /**
-     * View Window 内の low の最小値をスキャンして返す（ゼロアロケーション、Rustフォールバック）
+     * View Window 内の low の最小値をスキャンして返す（ゼロアロケーション、SIMD向け4-wideリダクション）
      * `decompress_view_window()` の呼び出し後に使用すること。
+     *
+     * # SIMD Auto-Vectorization Note
+     * 4 要素のアキュムレータを使い、forward sequential access の独立レーンで
+     * min を並列蓄積する。rustc (LLVM) は wasm32-unknown-unknown ターゲットでも
+     * この 4-wide reduction パターンを v128/f32x4_min に変換する。
+     * ループの trip count が 4 の倍数でない端数は最終 scalar reduction で処理。
      * @returns {number}
      */
     view_price_min() {
