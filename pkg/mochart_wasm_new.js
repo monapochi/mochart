@@ -769,7 +769,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**

@@ -26,6 +26,8 @@
 // handlers were registered.
 const WASM_MODULE_PATH = '../pkg/mochart_wasm_new.js';
 let WasmModule = null; // will hold the imported module namespace
+let _wasmInitPromise = null; // ensures __wbg_init runs at most once per worker
+let _workerInitState = 0; // 0=idle, 1=initializing, 2=ready
 
 import {
   STRIDE, WAKE, READY, START_BAR, VIS_BARS,
@@ -125,6 +127,28 @@ function _refreshWasmViews() {
   }
 }
 
+async function ensureWasmInitialized() {
+  if (!WasmModule) {
+    WasmModule = await import(WASM_MODULE_PATH);
+  }
+  const initFn = WasmModule.default ?? WasmModule.init ?? null;
+  if (!initFn) {
+    wasmMemory = WasmModule.memory;
+    return WasmModule;
+  }
+  if (!_wasmInitPromise) {
+    _wasmInitPromise = initFn();
+  }
+  try {
+    const wasmExports = await _wasmInitPromise;
+    wasmMemory = wasmExports.memory;
+    return wasmExports;
+  } catch (err) {
+    _wasmInitPromise = null;
+    throw err;
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 function buildPlan(sma1, sma2, sma3) {
   if (plan && plan.free) {
@@ -159,6 +183,13 @@ self.onmessage = async (evt) => {
     return;
   }
   if (evt.data.type !== 'init') return;
+  if (_workerInitState === 2) {
+    if (totalBars > 0) self.postMessage({ type: 'ready', bars: totalBars });
+    return;
+  }
+  if (_workerInitState === 1) return;
+  _workerInitState = 1;
+
   const { ctrl: ctrlBuf, frameCtrl: frameCtrlBuf, frameBuf, indSab: indSabBuf } = evt.data;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
@@ -181,12 +212,8 @@ self.onmessage = async (evt) => {
   _dstTime  = new Float64Array(frameSAB, FBUF_TIME_OFF,  FRAME_MAX_BARS);
 
   try {
-    // 1. Dynamically import and initialize WASM module
-    WasmModule = await import(WASM_MODULE_PATH);
-    // `WasmModule` may export a default init() function (wasm-bindgen glue)
-    const initFn = WasmModule.default ?? WasmModule.init ?? null;
-    const wasmExports = initFn ? await initFn() : WasmModule;
-    wasmMemory = wasmExports.memory;
+    // 1. Dynamically import and initialize WASM module (exactly once per worker)
+    await ensureWasmInitialized();
 
     // 2. Fetch OHLCV binary and ingest (uses WasmModule.OhlcvStore)
     const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin', wasmMemory);
@@ -207,8 +234,10 @@ self.onmessage = async (evt) => {
     self.postMessage({ type: 'ready', bars: barCount });
 
     // 5. Begin data loop
+    _workerInitState = 2;
     dataLoop();
   } catch (err) {
+    _workerInitState = 0;
     console.error('[data_worker] init failed:', err);
     self.postMessage({ type: 'error', message: String(err) });
   }
