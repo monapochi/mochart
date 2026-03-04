@@ -24,7 +24,7 @@ const gpuCanvas = document.getElementById('chart-gpu');
 const hudCanvas = document.getElementById('chart-hud');
 
 {
-  const dpr   = Math.ceil(window.devicePixelRatio || 1);
+  const dpr   = Math.round(window.devicePixelRatio || 1);
   const initW = Math.round((gpuCanvas.clientWidth  || window.innerWidth)  * dpr);
   const initH = Math.round((gpuCanvas.clientHeight || window.innerHeight) * dpr);
   gpuCanvas.width  = initW;
@@ -55,7 +55,7 @@ const indSab    = allocIndSab(EP_ARENA_F32);
 const renderWorker = new Worker(new URL('./render_worker.js', import.meta.url).href, { type: 'module' });
 const dataWorker   = new Worker(new URL('./data_worker.js', import.meta.url).href, { type: 'module' });
 
-const DPR = Math.ceil(window.devicePixelRatio || 1);
+const DPR = Math.round(window.devicePixelRatio || 1);
 
 // ── Init messages ─────────────────────────────────────────────────────────
 // Notify loading progress (30% = workers initialising).

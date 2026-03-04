@@ -34,7 +34,8 @@ import {
 
 // DPR is set from the main thread's init message (self.devicePixelRatio is
 // unreliable in Workers — may be undefined or 1 depending on browser version).
-let DPR = Math.ceil(self.devicePixelRatio || 2);
+// Math.round instead of Math.ceil: avoids 2x over-render on 1.25x/1.5x DPR displays.
+let DPR = Math.round(self.devicePixelRatio || 1);
 
 const LEGEND_ENTRIES = [
   { bit: 1, label: 'SMA 5',  color: '#00BCD4' },
@@ -181,7 +182,7 @@ self.onmessage = async (evt) => {
           frameCtrl: frcBuf, frameBuf: fsBuf, indSab } = evt.data;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
-    DPR = Math.ceil(evt.data.dpr);
+    DPR = Math.round(evt.data.dpr);
   }
   console.log('[render_worker] DPR:', DPR);
   gpuCanvas  = gc; hudCanvas = hc;
