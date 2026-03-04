@@ -67,6 +67,8 @@ const _statsFrame  = new Float32Array(STATS_SIZE);
 let   _statsHead   = 0;
 let   _statsFilled = 0;
 const _sortScratch = new Float32Array(STATS_SIZE);
+const PERF_POST_INTERVAL_MS = 500;
+let _lastPerfPostTs = 0;
 
 function percentile(buf, n, pct) {
   _sortScratch.set(buf.subarray(0, n));
@@ -356,7 +358,8 @@ function renderLoop() {
     _statsHead = (_statsHead + 1) % STATS_SIZE;
     if (_statsFilled < STATS_SIZE) _statsFilled++;
 
-    if ((lastFrameReadyVal & 15) === 0 && _statsFilled > 0) {
+    if (_statsFilled > 0 && (t0_frame - _lastPerfPostTs) >= PERF_POST_INTERVAL_MS) {
+      _lastPerfPostTs = t0_frame;
       const n = _statsFilled;
       const jsHeapUsedMB  = (performance.memory?.usedJSHeapSize  ?? 0) / 1048576;
       const jsHeapTotalMB = (performance.memory?.totalJSHeapSize ?? 0) / 1048576;
@@ -474,58 +477,52 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     if (!hit && (flags & 4) && !Number.isNaN(popupData.sma100) && Math.abs(cursorPrice - popupData.sma100) < hitMargin) hit = true;
 
     if (hit) {
-      const texts = [
-        `Date: ${dateLabel}`,
-        `O: ${popupData.open.toFixed(2)}  H: ${popupData.high.toFixed(2)}`,
-        `L: ${popupData.low.toFixed(2)}  C: ${popupData.close.toFixed(2)}`,
-        `Vol: ${formatVolume(popupData.vol)}`
-    ];
-    
-    // Add indicators if they are valid values (not NaN and above a reasonable threshold)
-    if ((flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0) {
-      texts.push(smaPrefix1 + ' ' + popupData.sma20.toFixed(2));
-    }
-    if ((flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0) {
-      texts.push(smaPrefix2 + ' ' + popupData.sma50.toFixed(2));
-    }
-    if ((flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0) {
-      texts.push(smaPrefix3 + ' ' + popupData.sma100.toFixed(2));
-    }
+      const line0 = `Date: ${dateLabel}`;
+      const line1 = `O: ${popupData.open.toFixed(2)}  H: ${popupData.high.toFixed(2)}`;
+      const line2 = `L: ${popupData.low.toFixed(2)}  C: ${popupData.close.toFixed(2)}`;
+      const line3 = `Vol: ${formatVolume(popupData.vol)}`;
+      const hasSma20 = (flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0;
+      const hasSma50 = (flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0;
+      const hasSma100 = (flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0;
+      const line4 = hasSma20 ? (smaPrefix1 + ' ' + popupData.sma20.toFixed(2)) : '';
+      const line5 = hasSma50 ? (smaPrefix2 + ' ' + popupData.sma50.toFixed(2)) : '';
+      const line6 = hasSma100 ? (smaPrefix3 + ' ' + popupData.sma100.toFixed(2)) : '';
 
-    ctx.font = '11px monospace';
-    let maxTw = 0;
-    for (const t of texts) maxTw = Math.max(maxTw, ctx.measureText(t).width);
-    
-    // Position to the left or right of the crosshair to avoid overlap
-    const boxW = maxTw + 12;
-    const boxH = texts.length * 16 + 8;
-    const boxX = (px + 10 + boxW < plotW) ? px + 10 : px - 10 - boxW;
-    const boxY = Math.max(boundY + 4, Math.min(py - boxH/2, boundY + boundH - boxH - 4));
-    
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.90)';
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.roundRect(boxX, boxY, boxW, boxH, 4);
-    ctx.fill();
-    ctx.stroke();
-    
-    ctx.fillStyle = '#222';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    for (let i = 0; i < texts.length; i++) {
-      // Basic syntax highlighting for indicator lines
-      if (texts[i].startsWith(smaPrefix1)) {
-        ctx.fillStyle = '#00BCD4';
-      } else if (texts[i].startsWith(smaPrefix2)) {
-        ctx.fillStyle = '#FFC107';
-      } else if (texts[i].startsWith(smaPrefix3)) {
-        ctx.fillStyle = '#E91E63'; 
-      } else {
-        ctx.fillStyle = '#222';
-      }
-      ctx.fillText(texts[i], boxX + 6, boxY + 6 + i * 16);
-    }
+      ctx.font = '11px monospace';
+      let maxTw = 0;
+      maxTw = Math.max(maxTw, ctx.measureText(line0).width);
+      maxTw = Math.max(maxTw, ctx.measureText(line1).width);
+      maxTw = Math.max(maxTw, ctx.measureText(line2).width);
+      maxTw = Math.max(maxTw, ctx.measureText(line3).width);
+      if (hasSma20) maxTw = Math.max(maxTw, ctx.measureText(line4).width);
+      if (hasSma50) maxTw = Math.max(maxTw, ctx.measureText(line5).width);
+      if (hasSma100) maxTw = Math.max(maxTw, ctx.measureText(line6).width);
+
+      const lineCount = 4 + (hasSma20 ? 1 : 0) + (hasSma50 ? 1 : 0) + (hasSma100 ? 1 : 0);
+      const boxW = maxTw + 12;
+      const boxH = lineCount * 16 + 8;
+      const boxX = (px + 10 + boxW < plotW) ? px + 10 : px - 10 - boxW;
+      const boxY = Math.max(boundY + 4, Math.min(py - boxH / 2, boundY + boundH - boxH - 4));
+
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.90)';
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      let row = 0;
+      ctx.fillStyle = '#222';
+      ctx.fillText(line0, boxX + 6, boxY + 6 + row * 16); row++;
+      ctx.fillText(line1, boxX + 6, boxY + 6 + row * 16); row++;
+      ctx.fillText(line2, boxX + 6, boxY + 6 + row * 16); row++;
+      ctx.fillText(line3, boxX + 6, boxY + 6 + row * 16); row++;
+      if (hasSma20) { ctx.fillStyle = '#00BCD4'; ctx.fillText(line4, boxX + 6, boxY + 6 + row * 16); row++; }
+      if (hasSma50) { ctx.fillStyle = '#FFC107'; ctx.fillText(line5, boxX + 6, boxY + 6 + row * 16); row++; }
+      if (hasSma100) { ctx.fillStyle = '#E91E63'; ctx.fillText(line6, boxX + 6, boxY + 6 + row * 16); }
     }
   }
 }
