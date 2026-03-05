@@ -103,8 +103,8 @@ function makeOnMessage(src) {
     } else if (evt.data?.type === 'perf') {
       lastPerfData = evt.data;
       // Feed live stats to the LP overlay.
-      if (lastPerfData?.frame?.ewma > 0) {
-        const fps      = 1000 / lastPerfData.frame.ewma;
+      if (lastPerfData?.frame?.ewma > 0 && frameMsEwma > 0) {
+        const fps      = 1000 / frameMsEwma;
         const renderMs = lastPerfData.frame.ewma;
         window._lpOnPerf?.(fps, renderMs);
       }
@@ -330,7 +330,7 @@ function tick(ts) {
   if (!gpuDirty && !hudDirty) {
     // idle — emit live stat update to LP overlay every 16 frames
     if ((frameId & 15) === 0 && frameMsEwma > 0) {
-      window._lpOnPerf?.(1000 / frameMsEwma, frameMsEwma);
+      window._lpOnPerf?.(1000 / frameMsEwma, lastPerfData?.frame?.ewma || frameMsEwma);
     }
     return;
   }
@@ -360,7 +360,7 @@ function tick(ts) {
   Atomics.notify(ctrl, ci * STRIDE + WAKE);
 
   if ((frameId & 15) === 0 && frameMsEwma > 0) {
-    window._lpOnPerf?.(1000 / frameMsEwma, frameMsEwma);
+    window._lpOnPerf?.(1000 / frameMsEwma, lastPerfData?.frame?.ewma || frameMsEwma);
   }
 }
 
