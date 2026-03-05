@@ -24,8 +24,8 @@
 // errors and surface them to the main thread. The static import previously
 // executed during module evaluation and could throw before our global
 // handlers were registered.
-const WORKER_BUILD_VERSION = '20260306b';
-const WASM_GLUE_VERSION = '20260306b';
+const WORKER_BUILD_VERSION = '20260306c';
+const WASM_GLUE_VERSION = '20260306c';
 const WASM_MODULE_PATH = `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`;
 let WasmModule = null; // will hold the imported module namespace
 let _wasmInitPromise = null; // ensures __wbg_init runs at most once per worker

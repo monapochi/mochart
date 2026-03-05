@@ -33,7 +33,7 @@ import {
   INDSAB_ARENA_OFF,
 } from './shared_protocol.js';
 
-const WORKER_BUILD_VERSION = '20260306b';
+const WORKER_BUILD_VERSION = '20260306c';
 
 // DPR is set from the main thread's init message (self.devicePixelRatio is
 // unreliable in Workers — may be undefined or 1 depending on browser version).
