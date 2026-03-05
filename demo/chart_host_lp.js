@@ -300,10 +300,6 @@ let prevPlotH  = -1;
 let prevPtrX   = -2;
 let prevPtrY   = -2;
 
-let lastUpdateTs = 0;
-const MAX_FPS = 120;
-const MIN_UPDATE_INTERVAL = 1000 / MAX_FPS;
-
 function tick(ts) {
   requestAnimationFrame(tick);
 
@@ -311,11 +307,6 @@ function tick(ts) {
   lastTs   = ts;
   if (dt > 0 && dt < 1000) {
     frameMsEwma = frameMsEwma === 0 ? dt : frameMsEwma * 0.9 + dt * 0.1;
-  }
-
-  // Throttle updates to max 120fps
-  if (ts - lastUpdateTs < MIN_UPDATE_INTERVAL) {
-    return;
   }
 
   const curFlags = smaFlags();
@@ -334,8 +325,6 @@ function tick(ts) {
     }
     return;
   }
-
-  lastUpdateTs = ts;
 
   prevStart = startBar;
   prevVis   = visBars;
