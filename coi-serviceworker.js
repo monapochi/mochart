@@ -20,9 +20,13 @@
 
 /* ── Registration (runs in the main window context) ── */
 if (typeof window !== 'undefined') {
-  if (!window.crossOriginIsolated && 'serviceWorker' in navigator) {
+  const RELOAD_FLAG = '__coi_reloaded__';
+
+  if (window.crossOriginIsolated) {
+    // Successfully isolated: clear the flag so future hard-reloads can recover.
+    try { sessionStorage.removeItem(RELOAD_FLAG); } catch (e) {}
+  } else if ('serviceWorker' in navigator) {
     // Guard against infinite reload loops (SW activation can trigger multiple reloads).
-    const RELOAD_FLAG = '__coi_reloaded__';
     navigator.serviceWorker
       .register(window.document.currentScript.src)
       .then((reg) => {
