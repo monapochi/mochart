@@ -33,6 +33,8 @@ import {
   INDSAB_ARENA_OFF,
 } from './shared_protocol.js';
 
+const WORKER_BUILD_VERSION = '20260306b';
+
 // DPR is set from the main thread's init message (self.devicePixelRatio is
 // unreliable in Workers — may be undefined or 1 depending on browser version).
 // Math.round instead of Math.ceil: avoids 2x over-render on 1.25x/1.5x DPR displays.
@@ -207,7 +209,12 @@ self.onmessage = async (evt) => {
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
     DPR = Math.round(evt.data.dpr);
   }
-  console.log('[render_worker] DPR:', DPR);
+  console.log(
+    '[render_worker] init |',
+    `dpr=${DPR}`,
+    `worker=${WORKER_BUILD_VERSION}`,
+    `host=${evt.data.buildVersion ?? 'n/a'}`,
+  );
   gpuCanvas  = gc; hudCanvas = hc;
   ctrl       = new Int32Array(ctrlBuf);
   frameCtrl  = new Int32Array(frcBuf);

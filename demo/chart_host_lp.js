@@ -52,7 +52,15 @@ const indSab    = allocIndSab(EP_ARENA_F32);
 
 // ── Workers ──────────────────────────────────────────────────────────────
 // import.meta.url を基準に絶対URL文字列を生成して Worker に渡す (末尾スラッシュ問題の回避)
-const WORKER_VERSION = '20260306a';
+const LP_BUILD_VERSION = '20260306b';
+const WORKER_VERSION = '20260306b';
+const WASM_GLUE_VERSION = '20260306b';
+console.log(
+  '[lp_host] build |',
+  `lp=${LP_BUILD_VERSION}`,
+  `worker=${WORKER_VERSION}`,
+  `wasmGlue=${WASM_GLUE_VERSION}`,
+);
 const renderWorker = new Worker(new URL(`./render_worker.js?v=${WORKER_VERSION}`, import.meta.url).href, { type: 'module' });
 const dataWorker   = new Worker(new URL(`./data_worker.js?v=${WORKER_VERSION}`, import.meta.url).href, { type: 'module' });
 
@@ -64,13 +72,13 @@ window._lpOnProgress?.(30, 'Loading WebGPU renderer…');
 
 renderWorker.postMessage(
   { type: 'init', gpuCanvas: gpuOff, hudCanvas: hudOff,
-    ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR },
+    ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR, buildVersion: LP_BUILD_VERSION },
   [gpuOff, hudOff],
 );
 
 dataWorker.postMessage({
   type: 'init',
-  ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR,
+  ctrl: ctrlBuf, frameCtrl, frameBuf, indSab, dpr: DPR, buildVersion: LP_BUILD_VERSION,
 });
 
 // Set default SMA periods to the same values as the demo.
