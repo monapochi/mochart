@@ -90,6 +90,73 @@ let totalBars = 0;
 /** Monotone frame counter written to FBUF_SEQ and FCTRL_READY. */
 let frameSeq = 0;
 
+// Last known SMA periods from UI control (used as base when plan is rebuilt).
+let _sma1 = 5;
+let _sma2 = 25;
+let _sma3 = 75;
+
+// Dynamic indicators added from API messages.
+// Kept as logical configs; plan is rebuilt from this list when changed.
+/** @type {Array<{
+ *  id: string | number,
+ *  kind: number,
+ *  period: number,
+ *  pane: number,
+ *  style: number,
+ *  r: number,
+ *  g: number,
+ *  b: number,
+ *  a: number,
+ *  lineWidth: number,
+ *  slow?: number,
+ *  signal?: number,
+ *  stdDev?: number,
+ * }>} */
+let _extraIndicators = [];
+
+/** @type {Map<string | number, number>} */
+let _extraClientToSlotId = new Map();
+
+const KIND_TO_U8 = Object.freeze({ SMA: 0, EMA: 1, BB: 2, RSI: 3, MACD: 4, ATR: 5, OBV: 6, VOLUME: 7 });
+const STYLE_TO_U8 = Object.freeze({ LINE: 0, THICKLINE: 1, HISTOGRAM: 2, BAND: 3 });
+const PANE_TO_U8 = Object.freeze({ MAIN: 0, SUB1: 1, SUB2: 2 });
+
+function _toKindU8(kind) {
+  if (typeof kind === 'number') return kind & 0xff;
+  if (typeof kind === 'string') return KIND_TO_U8[kind.toUpperCase()] ?? 0;
+  return 0;
+}
+
+function _toStyleU8(style) {
+  if (typeof style === 'number') return style & 0xff;
+  if (typeof style === 'string') return STYLE_TO_U8[style.toUpperCase()] ?? 1; // ThickLine default
+  return 1;
+}
+
+function _toPaneU8(pane) {
+  if (typeof pane === 'number') return pane & 0xff;
+  if (typeof pane === 'string') return PANE_TO_U8[pane.toUpperCase()] ?? 0;
+  return 0;
+}
+
+function _sanitizeExtraIndicator(msg) {
+  return {
+    id: msg.id,
+    kind: _toKindU8(msg.kind),
+    period: (msg.period | 0) > 0 ? (msg.period | 0) : 14,
+    pane: _toPaneU8(msg.pane),
+    style: _toStyleU8(msg.style),
+    r: Number.isFinite(msg.r) ? msg.r : 0.2,
+    g: Number.isFinite(msg.g) ? msg.g : 0.6,
+    b: Number.isFinite(msg.b) ? msg.b : 0.9,
+    a: Number.isFinite(msg.a) ? msg.a : 1.0,
+    lineWidth: Number.isFinite(msg.lineWidth) ? msg.lineWidth : 1.5,
+    slow: (msg.slow | 0) > 0 ? (msg.slow | 0) : undefined,
+    signal: (msg.signal | 0) > 0 ? (msg.signal | 0) : undefined,
+    stdDev: Number.isFinite(msg.stdDev) ? msg.stdDev : undefined,
+  };
+}
+
 // ── Typed array views on frameBuf (set once at init, zero-alloc per frame) ──
 /** @type {SharedArrayBuffer} */ let frameSAB;
 /** @type {SharedArrayBuffer} */ let indSab;
@@ -161,6 +228,20 @@ function buildPlan(sma1, sma2, sma3) {
   plan.add_indicator(/*RSI*/3, 14,  /*pane*/1, /*ThickLine*/1, 0.61, 0.35, 0.71, 1.0, 1.5);
   plan.add_indicator(/*MACD*/4, 12, /*pane*/1, /*ThickLine*/1, 0.16, 0.50, 0.73, 1.0, 1.5);
   plan.add_indicator(/*Volume*/7, 0, /*pane*/2, /*Histogram*/2, 0.20, 0.60, 0.90, 0.8, 1.0);
+
+  // Add dynamic extra indicators requested by API messages.
+  _extraClientToSlotId.clear();
+  for (let i = 0; i < _extraIndicators.length; i++) {
+    const e = _extraIndicators[i];
+    const slotId = plan.add_indicator(e.kind, e.period, e.pane, e.style, e.r, e.g, e.b, e.a, e.lineWidth);
+    if (e.kind === 4) {
+      plan.set_macd_params(slotId, e.period, e.slow ?? 26, e.signal ?? 9);
+    } else if (e.kind === 2 && Number.isFinite(e.stdDev)) {
+      plan.set_bb_params(slotId, e.stdDev);
+    }
+    _extraClientToSlotId.set(e.id, slotId);
+  }
+
   plan.compile(200);   // initial compile with default vis_count; recompiles if vis_bars changes
 
   // Map slot_id → FLAGS bitmask (0 = always render).
@@ -177,11 +258,74 @@ function buildPlan(sma1, sma2, sma3) {
 self.onmessage = async (evt) => {
   if (evt.data.type === 'update_sma') {
     if (plan && WasmModule) {
-      buildPlan(evt.data.sma1, evt.data.sma2, evt.data.sma3);
+      _sma1 = (evt.data.sma1 | 0) > 0 ? (evt.data.sma1 | 0) : _sma1;
+      _sma2 = (evt.data.sma2 | 0) > 0 ? (evt.data.sma2 | 0) : _sma2;
+      _sma3 = (evt.data.sma3 | 0) > 0 ? (evt.data.sma3 | 0) : _sma3;
+      buildPlan(_sma1, _sma2, _sma3);
       // Wait for next frame request to re-execute and render
     }
     return;
   }
+
+  if (evt.data.type === 'ep_add') {
+    if (!plan || !WasmModule) return;
+    if (evt.data.id === undefined || evt.data.id === null) return;
+
+    const spec = _sanitizeExtraIndicator(evt.data);
+    const exists = _extraIndicators.findIndex((x) => x.id === spec.id);
+    if (exists >= 0) _extraIndicators[exists] = spec;
+    else _extraIndicators.push(spec);
+
+    buildPlan(_sma1, _sma2, _sma3);
+    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    plan.compile(vis);
+
+    self.postMessage({ type: 'ep_added', id: spec.id, slotId: _extraClientToSlotId.get(spec.id) ?? -1 });
+    return;
+  }
+
+  if (evt.data.type === 'ep_update') {
+    if (!plan || !WasmModule) return;
+    const id = evt.data.id;
+    if (id === undefined || id === null) return;
+    const idx = _extraIndicators.findIndex((x) => x.id === id);
+    if (idx < 0) {
+      self.postMessage({ type: 'ep_error', id, message: 'indicator not found' });
+      return;
+    }
+
+    const cur = _extraIndicators[idx];
+    const next = _sanitizeExtraIndicator({ ...cur, ...evt.data, id });
+    _extraIndicators[idx] = next;
+
+    buildPlan(_sma1, _sma2, _sma3);
+    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    plan.compile(vis);
+
+    self.postMessage({ type: 'ep_updated', id, slotId: _extraClientToSlotId.get(id) ?? -1 });
+    return;
+  }
+
+  if (evt.data.type === 'ep_remove') {
+    if (!plan || !WasmModule) return;
+    const id = evt.data.id;
+    if (id === undefined || id === null) return;
+
+    const before = _extraIndicators.length;
+    _extraIndicators = _extraIndicators.filter((x) => x.id !== id);
+    if (_extraIndicators.length === before) {
+      self.postMessage({ type: 'ep_error', id, message: 'indicator not found' });
+      return;
+    }
+
+    buildPlan(_sma1, _sma2, _sma3);
+    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    plan.compile(vis);
+
+    self.postMessage({ type: 'ep_removed', id });
+    return;
+  }
+
   if (evt.data.type !== 'init') return;
   if (_workerInitState === 2) {
     if (totalBars > 0) self.postMessage({ type: 'ready', bars: totalBars });
