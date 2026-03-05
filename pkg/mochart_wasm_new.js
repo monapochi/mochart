@@ -15,23 +15,11 @@ export class ChartViewport {
         wasm.__wbg_chartviewport_free(ptr, 0);
     }
     /**
-     * カーソル位置からクロスヘア情報を計算して返す。
-     *
-     * - `x_px`, `y_px`: CSS ピクセル座標
-     * - `price_min`, `price_max`: 現在の表示価格レンジ
-     * - `plot_height_px`: プロット領域の高さ (CSS px)
-     *
-     * 戻り値: `CrosshairResult`（bar インデックス、価格、NDC 座標）
-     * @param {number} x_px
-     * @param {number} y_px
-     * @param {number} price_min
-     * @param {number} price_max
-     * @param {number} plot_height_px
-     * @returns {CrosshairResult}
+     * @returns {number}
      */
-    crosshair(x_px, y_px, price_min, price_max, plot_height_px) {
-        const ret = wasm.chartviewport_crosshair(this.__wbg_ptr, x_px, y_px, price_min, price_max, plot_height_px);
-        return CrosshairResult.__wrap(ret);
+    crosshair_out_ptr() {
+        const ret = wasm.chartviewport_crosshair_out_ptr(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * 新規ビューポートを作成する。
@@ -94,6 +82,24 @@ export class ChartViewport {
         return ret >>> 0;
     }
     /**
+     * カーソル位置からクロスヘア情報を計算して返す。
+     *
+     * - `x_px`, `y_px`: CSS ピクセル座標
+     * - `price_min`, `price_max`: 現在の表示価格レンジ
+     * - `plot_height_px`: プロット領域の高さ (CSS px)
+     *
+     * 値を WASM メモリ上の配列に書き込む（JS 側オブジェクト生成を回避）。
+     * `crosshair_out_ptr` から `[f64; 4]` を読んでください。
+     * @param {number} x_px
+     * @param {number} y_px
+     * @param {number} price_min
+     * @param {number} price_max
+     * @param {number} plot_height_px
+     */
+    update_crosshair(x_px, y_px, price_min, price_max, plot_height_px) {
+        wasm.chartviewport_update_crosshair(this.__wbg_ptr, x_px, y_px, price_min, price_max, plot_height_px);
+    }
+    /**
      * @returns {number}
      */
     visible_bars() {
@@ -114,118 +120,6 @@ export class ChartViewport {
     }
 }
 if (Symbol.dispose) ChartViewport.prototype[Symbol.dispose] = ChartViewport.prototype.free;
-
-/**
- * `ChartViewport::crosshair()` の戻り値。JS 側で `Canvas 2D` HUD 描画に使う。
- */
-export class CrosshairResult {
-    static __wrap(ptr) {
-        ptr = ptr >>> 0;
-        const obj = Object.create(CrosshairResult.prototype);
-        obj.__wbg_ptr = ptr;
-        CrosshairResultFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        CrosshairResultFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_crosshairresult_free(ptr, 0);
-    }
-    /**
-     * @returns {number}
-     */
-    bar_idx() {
-        const ret = wasm.crosshairresult_bar_idx(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    price() {
-        const ret = wasm.crosshairresult_price(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * @returns {number}
-     */
-    x_ndc() {
-        const ret = wasm.crosshairresult_x_ndc(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * @returns {number}
-     */
-    y_ndc() {
-        const ret = wasm.crosshairresult_y_ndc(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * バーインデックス（OhlcvStore の絶対インデックス）
-     * @returns {number}
-     */
-    get bar_idx() {
-        const ret = wasm.__wbg_get_crosshairresult_bar_idx(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * カーソル位置の価格
-     * @returns {number}
-     */
-    get price() {
-        const ret = wasm.__wbg_get_crosshairresult_price(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * カーソル X の NDC 座標 [-1, 1]
-     * @returns {number}
-     */
-    get x_ndc() {
-        const ret = wasm.__wbg_get_crosshairresult_x_ndc(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * カーソル Y の NDC 座標 [-1, 1]
-     * @returns {number}
-     */
-    get y_ndc() {
-        const ret = wasm.__wbg_get_crosshairresult_y_ndc(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * バーインデックス（OhlcvStore の絶対インデックス）
-     * @param {number} arg0
-     */
-    set bar_idx(arg0) {
-        wasm.__wbg_set_crosshairresult_bar_idx(this.__wbg_ptr, arg0);
-    }
-    /**
-     * カーソル位置の価格
-     * @param {number} arg0
-     */
-    set price(arg0) {
-        wasm.__wbg_set_crosshairresult_price(this.__wbg_ptr, arg0);
-    }
-    /**
-     * カーソル X の NDC 座標 [-1, 1]
-     * @param {number} arg0
-     */
-    set x_ndc(arg0) {
-        wasm.__wbg_set_crosshairresult_x_ndc(this.__wbg_ptr, arg0);
-    }
-    /**
-     * カーソル Y の NDC 座標 [-1, 1]
-     * @param {number} arg0
-     */
-    set y_ndc(arg0) {
-        wasm.__wbg_set_crosshairresult_y_ndc(this.__wbg_ptr, arg0);
-    }
-}
-if (Symbol.dispose) CrosshairResult.prototype[Symbol.dispose] = CrosshairResult.prototype.free;
 
 /**
  * CPU-First indicator execution plan.
@@ -769,7 +663,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -994,9 +888,6 @@ function __wbg_get_imports() {
 const ChartViewportFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_chartviewport_free(ptr >>> 0, 1));
-const CrosshairResultFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_crosshairresult_free(ptr >>> 0, 1));
 const ExecutionPlanFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_executionplan_free(ptr >>> 0, 1));

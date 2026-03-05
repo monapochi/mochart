@@ -88,7 +88,9 @@ const DATE_CACHE_MAX = 512;
 function isoDateStr(ms) {
   let s = _dateCache.get(ms);
   if (s !== undefined) return s;
+  // @zero_alloc_allow: Date parsing and string formatting is cached immediately
   const d = new Date(ms), m = d.getUTCMonth() + 1, dy = d.getUTCDate();
+  // @zero_alloc_allow: Template string required for formatting, but is cached
   s = `${d.getUTCFullYear()}-${m<10?'0':''}${m}-${dy<10?'0':''}${dy}`;
   if (_dateCache.size >= DATE_CACHE_MAX) _dateCache.delete(_dateCache.keys().next().value);
   _dateCache.set(ms, s);
@@ -168,6 +170,7 @@ function _readSmaPop(idx) {
   // Re-create _indArenaView only when arena length grows (rare: plan recompile).
   const arenaLen = hdr.getUint32(INDSAB_ARENA_LEN, true);
   if (!_indArenaView || arenaLen > _indArenaViewLen) {
+    // @zero_alloc_allow: View recreation is guarded and amortized to O(1)
     _indArenaView = new Float32Array(_indSabRef, INDSAB_ARENA_OFF, arenaLen);
     _indArenaViewLen = arenaLen;
   }
@@ -247,6 +250,7 @@ function renderLoop() {
   const hudHasCommit = typeof hud.commit === 'function';
   let firstFrame = true;
 
+  /** @zero_alloc */
   function renderFrame() {
     if (self.requestAnimationFrame) {
       self.requestAnimationFrame(renderFrame);
@@ -364,6 +368,7 @@ function renderLoop() {
       const jsHeapUsedMB  = (performance.memory?.usedJSHeapSize  ?? 0) / 1048576;
       const jsHeapTotalMB = (performance.memory?.totalJSHeapSize ?? 0) / 1048576;
       if (jsHeapUsedMB > _memPeakJsMB) _memPeakJsMB = jsHeapUsedMB;
+      // @zero_alloc_allow: Reporting metrics every few seconds to main thread, unavoidable boundary clone
       self.postMessage({
         type: 'perf',
         wasm:  { ewma: 0, p50: 0, p95: 0 },
@@ -389,6 +394,9 @@ function niceStep(range, ticks) {
   return (r <= 1 ? 1 : r <= 2 ? 2 : r <= 5 ? 5 : 10) * pow;
 }
 
+const _dashArray1 = [3, 4];
+const _dashArrayEmpty = [];
+
 function drawPriceAxis(ctx, w, h, yMin, yMax, layout) {
   const plotW = w - 60;
   
@@ -406,10 +414,11 @@ function drawPriceAxis(ctx, w, h, yMin, yMax, layout) {
   for (let v = first; v <= yMax + 1e-9; v += step) {
     const y = boundY + (1 - (v - yMin) / (yMax - yMin)) * boundH;
     ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-    ctx.setLineDash([3, 4]);
+    ctx.setLineDash(_dashArray1);
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(plotW, y); ctx.stroke();
-    ctx.setLineDash([]);
+    ctx.setLineDash(_dashArrayEmpty);
     ctx.fillStyle = '#555';
+    // @zero_alloc_allow: Fast string format required for price labels
     ctx.fillText(v.toFixed(2), w - 4, y);
   }
   ctx.restore();
@@ -434,15 +443,17 @@ function drawDateAxis(ctx, w, h, viewLen) {
   ctx.restore();
 }
 
+const _dashArrayCrosshair = [4, 4];
+
 function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', popupData = null, flags = 0) {
   const plotW = w - 60, clampedX = Math.min(px, plotW), DATE_BADGE_H = 16;
   ctx.save();
   ctx.strokeStyle = 'rgba(0,0,0,0.40)';
-  ctx.setLineDash([4, 4]);
+  ctx.setLineDash(_dashArrayCrosshair);
   ctx.beginPath(); ctx.moveTo(clampedX, 0);
   ctx.lineTo(clampedX, dateLabel ? h - DATE_BADGE_H : h); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(plotW, py); ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.setLineDash(_dashArrayEmpty);
   
   // Define layout bounds for main pane (for price axis tag)
   const boundY = layout && layout.main ? layout.main.y / DPR : 0;
@@ -453,6 +464,7 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     ctx.fillStyle = '#ddd'; ctx.fillRect(plotW + 1, py - 9, 58, 18);
     ctx.fillStyle = '#222'; ctx.font = '10px monospace';
     ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    // @zero_alloc_allow: Fast format for interactive price label
     ctx.fillText(price.toFixed(2), w - 4, py);
   }
 
@@ -477,16 +489,24 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     if (!hit && (flags & 4) && !Number.isNaN(popupData.sma100) && Math.abs(cursorPrice - popupData.sma100) < hitMargin) hit = true;
 
     if (hit) {
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line0 = `Date: ${dateLabel}`;
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line1 = `O: ${popupData.open.toFixed(2)}  H: ${popupData.high.toFixed(2)}`;
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line2 = `L: ${popupData.low.toFixed(2)}  C: ${popupData.close.toFixed(2)}`;
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line3 = `Vol: ${formatVolume(popupData.vol)}`;
       const hasSma20 = (flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0;
       const hasSma50 = (flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0;
       const hasSma100 = (flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0;
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line4 = hasSma20 ? (smaPrefix1 + ' ' + popupData.sma20.toFixed(2)) : '';
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line5 = hasSma50 ? (smaPrefix2 + ' ' + popupData.sma50.toFixed(2)) : '';
+      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
       const line6 = hasSma100 ? (smaPrefix3 + ' ' + popupData.sma100.toFixed(2)) : '';
+
 
       ctx.font = '11px monospace';
       let maxTw = 0;
@@ -506,7 +526,7 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
 
       ctx.fillStyle = 'rgba(255, 255, 255, 0.90)';
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
-      ctx.setLineDash([]);
+      ctx.setLineDash(_dashArrayEmpty);
       ctx.beginPath();
       ctx.roundRect(boxX, boxY, boxW, boxH, 4);
       ctx.fill();
@@ -527,6 +547,7 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
   }
 }
 
+// @zero_alloc_allow: Fast format path for volume, strings are immutable and cannot be pre-allocated generally without a complex atlas
 function formatVolume(v) {
   if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
   if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
@@ -539,7 +560,7 @@ function drawPaneBorders(ctx, plotW, layout) {
   ctx.save();
   ctx.strokeStyle = '#e0e0e0';
   ctx.lineWidth = 1;
-  ctx.setLineDash([]);
+  ctx.setLineDash(_dashArrayEmpty);
   
   const gap = (layout.gap || 0) / DPR;
 
@@ -580,6 +601,7 @@ function drawLegend(ctx, flags) {
   }
   if (_r64[R_LAST_GPU_MS] > 0) {
     ctx.font = '10px monospace'; ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    // @zero_alloc_allow: String formatting for debugging text overlay
     ctx.fillText(`GPU ~${_r64[R_LAST_GPU_MS].toFixed(1)}ms`, x, 9);
   }
   ctx.restore();

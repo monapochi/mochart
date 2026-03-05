@@ -117,6 +117,7 @@ export class GpuRenderer {
   _vpRenderDv = new DataView(this._vpRenderUbuf);  // DataView on _vpRenderUbuf
   _indUniBuf = new ArrayBuffer(80);   // EP indicator uniform (80B = max of all shader types)
   _indUniBufDv = new DataView(this._indUniBuf);  // DataView on _indUniBuf
+  _cachedLayout = { main: { y: 0, h: 0 }, sub1: { y: 0, h: 0 }, sub2: { y: 0, h: 0 }, gap: 0 };
 
   // ── Cached arena view for indSab GPU upload ──
   /** @type {Float32Array|null} */ _indArenaView = null;
@@ -755,7 +756,9 @@ export class GpuRenderer {
     const marginBot = (config.marginBot !== undefined ? config.marginBot : 8) * DPR;
     const usableH = Math.max(1, plotH - marginBot);
 
-    let layout;
+    const layout = this._cachedLayout;
+    layout.main.y = 0;
+
     if (hasSub1 && hasSub2) {
       const rM = config.main || 7.0;
       const r1 = config.sub1 || 1.5;
@@ -765,35 +768,39 @@ export class GpuRenderer {
       const mainH = Math.max(1, Math.round(usable * (rM / total)));
       const sub1H = Math.max(1, Math.round(usable * (r1 / total)));
       const sub2H = Math.max(1, usable - mainH - sub1H);
-      layout = {
-        main: { y: 0, h: mainH },
-        sub1: { y: mainH + gap, h: sub1H },
-        sub2: { y: mainH + sub1H + gap * 2, h: sub2H },
-      };
+      layout.main.h = mainH;
+      layout.sub1.y = mainH + gap;
+      layout.sub1.h = sub1H;
+      layout.sub2.y = mainH + sub1H + gap * 2;
+      layout.sub2.h = sub2H;
     } else if (hasSub1) {
       const rM = config.main || 7.0;
       const r1 = config.sub1 || 1.5;
       const total = rM + r1;
       const usable = usableH - gap;
       const mainH = Math.max(1, Math.round(usable * (rM / total)));
-      layout = {
-        main: { y: 0, h: mainH },
-        sub1: { y: mainH + gap, h: usable - mainH },
-        sub2: null,
-      };
+      layout.main.h = mainH;
+      layout.sub1.y = mainH + gap;
+      layout.sub1.h = usable - mainH;
+      layout.sub2.y = 0;
+      layout.sub2.h = 0;
     } else if (hasSub2) {
       const rM = config.main || 7.0;
       const r2 = config.sub2 || 1.5;
       const total = rM + r2;
       const usable = usableH - gap;
       const mainH = Math.max(1, Math.round(usable * (rM / total)));
-      layout = {
-        main: { y: 0, h: mainH },
-        sub1: null,
-        sub2: { y: mainH + gap, h: usable - mainH },
-      };
+      layout.main.h = mainH;
+      layout.sub1.y = 0;
+      layout.sub1.h = 0;
+      layout.sub2.y = mainH + gap;
+      layout.sub2.h = usable - mainH;
     } else {
-      layout = { main: { y: 0, h: usableH }, sub1: null, sub2: null };
+      layout.main.h = usableH;
+      layout.sub1.y = 0;
+      layout.sub1.h = 0;
+      layout.sub2.y = 0;
+      layout.sub2.h = 0;
     }
     layout.gap = gap;
     
