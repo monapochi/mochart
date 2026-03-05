@@ -338,6 +338,8 @@ function renderLoop() {
               _popupData.low   = _fbLow[lIdx];
               _popupData.close = _fbClose[lIdx];
               _popupData.vol   = _fbVol[lIdx];
+              // Attach stable identity for popup-cache invalidation.
+              _popupData.time = _fbTime[lIdx];
               // SMA values read from EP arena (no legacy frameBuf SMA channels)
               _readSmaPop(lIdx);
               popupData = _popupData;
@@ -445,6 +447,17 @@ function drawDateAxis(ctx, w, h, viewLen) {
 
 const _dashArrayCrosshair = [4, 4];
 
+// Caches to avoid repeated string allocations & measureText in drawCrosshair
+const _popupCache = {
+  lastBarTime: NaN,
+  lastFlags: -1,
+  lines: ['', '', '', '', '', '', ''],
+  widths: [0, 0, 0, 0, 0, 0, 0],
+  lineCount: 0,
+};
+
+const _priceLabelCache = { last: NaN, str: '' };
+
 function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', popupData = null, flags = 0) {
   const plotW = w - 60, clampedX = Math.min(px, plotW), DATE_BADGE_H = 16;
   ctx.save();
@@ -464,8 +477,14 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     ctx.fillStyle = '#ddd'; ctx.fillRect(plotW + 1, py - 9, 58, 18);
     ctx.fillStyle = '#222'; ctx.font = '10px monospace';
     ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    // @zero_alloc_allow: Fast format for interactive price label
-    ctx.fillText(price.toFixed(2), w - 4, py);
+    // Cached price label to avoid allocating strings per-frame
+    let priceStr;
+    if (_priceLabelCache.last !== price) {
+      _priceLabelCache.last = price;
+      _priceLabelCache.str = price.toFixed(2);
+    }
+    priceStr = _priceLabelCache.str;
+    ctx.fillText(priceStr, w - 4, py);
   }
 
   if (dateLabel) {
@@ -489,36 +508,39 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     if (!hit && (flags & 4) && !Number.isNaN(popupData.sma100) && Math.abs(cursorPrice - popupData.sma100) < hitMargin) hit = true;
 
     if (hit) {
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line0 = `Date: ${dateLabel}`;
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line1 = `O: ${popupData.open.toFixed(2)}  H: ${popupData.high.toFixed(2)}`;
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line2 = `L: ${popupData.low.toFixed(2)}  C: ${popupData.close.toFixed(2)}`;
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line3 = `Vol: ${formatVolume(popupData.vol)}`;
-      const hasSma20 = (flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0;
-      const hasSma50 = (flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0;
-      const hasSma100 = (flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0;
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line4 = hasSma20 ? (smaPrefix1 + ' ' + popupData.sma20.toFixed(2)) : '';
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line5 = hasSma50 ? (smaPrefix2 + ' ' + popupData.sma50.toFixed(2)) : '';
-      // @zero_alloc_allow: Transient label generation for popup tooltip is unavoidable
-      const line6 = hasSma100 ? (smaPrefix3 + ' ' + popupData.sma100.toFixed(2)) : '';
+      // Rebuild popup strings only when bar identity or indicator set changes.
+      const barTime = Number.isFinite(popupData.time) ? popupData.time : NaN;
+      if (_popupCache.lastBarTime !== barTime || _popupCache.lastFlags !== flags) {
+        _popupCache.lastBarTime = barTime;
+        _popupCache.lastFlags = flags;
+        _popupCache.lines[0] = 'Date: ' + dateLabel;
+        _popupCache.lines[1] = 'O: ' + popupData.open.toFixed(2) + '  H: ' + popupData.high.toFixed(2);
+        _popupCache.lines[2] = 'L: ' + popupData.low.toFixed(2) + '  C: ' + popupData.close.toFixed(2);
+        _popupCache.lines[3] = 'Vol: ' + formatVolume(popupData.vol);
+        const hasSma20 = (flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0;
+        const hasSma50 = (flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0;
+        const hasSma100 = (flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0;
+        _popupCache.lineCount = 4 + (hasSma20 ? 1 : 0) + (hasSma50 ? 1 : 0) + (hasSma100 ? 1 : 0);
+        _popupCache.lines[4] = hasSma20 ? (smaPrefix1 + ' ' + popupData.sma20.toFixed(2)) : '';
+        _popupCache.lines[5] = hasSma50 ? (smaPrefix2 + ' ' + popupData.sma50.toFixed(2)) : '';
+        _popupCache.lines[6] = hasSma100 ? (smaPrefix3 + ' ' + popupData.sma100.toFixed(2)) : '';
+        // measure widths once and cache
+        ctx.font = '11px monospace';
+        _popupCache.widths[0] = ctx.measureText(_popupCache.lines[0]).width;
+        _popupCache.widths[1] = ctx.measureText(_popupCache.lines[1]).width;
+        _popupCache.widths[2] = ctx.measureText(_popupCache.lines[2]).width;
+        _popupCache.widths[3] = ctx.measureText(_popupCache.lines[3]).width;
+        _popupCache.widths[4] = _popupCache.lines[4] ? ctx.measureText(_popupCache.lines[4]).width : 0;
+        _popupCache.widths[5] = _popupCache.lines[5] ? ctx.measureText(_popupCache.lines[5]).width : 0;
+        _popupCache.widths[6] = _popupCache.lines[6] ? ctx.measureText(_popupCache.lines[6]).width : 0;
+      }
 
-
-      ctx.font = '11px monospace';
+      // compute max width from cached widths
       let maxTw = 0;
-      maxTw = Math.max(maxTw, ctx.measureText(line0).width);
-      maxTw = Math.max(maxTw, ctx.measureText(line1).width);
-      maxTw = Math.max(maxTw, ctx.measureText(line2).width);
-      maxTw = Math.max(maxTw, ctx.measureText(line3).width);
-      if (hasSma20) maxTw = Math.max(maxTw, ctx.measureText(line4).width);
-      if (hasSma50) maxTw = Math.max(maxTw, ctx.measureText(line5).width);
-      if (hasSma100) maxTw = Math.max(maxTw, ctx.measureText(line6).width);
-
-      const lineCount = 4 + (hasSma20 ? 1 : 0) + (hasSma50 ? 1 : 0) + (hasSma100 ? 1 : 0);
+      for (let i = 0; i < _popupCache.lineCount; i++) {
+        maxTw = Math.max(maxTw, _popupCache.widths[i] || 0);
+      }
+      const lineCount = _popupCache.lineCount;
       const boxW = maxTw + 12;
       const boxH = lineCount * 16 + 8;
       const boxX = (px + 10 + boxW < plotW) ? px + 10 : px - 10 - boxW;
@@ -535,14 +557,16 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       let row = 0;
-      ctx.fillStyle = '#222';
-      ctx.fillText(line0, boxX + 6, boxY + 6 + row * 16); row++;
-      ctx.fillText(line1, boxX + 6, boxY + 6 + row * 16); row++;
-      ctx.fillText(line2, boxX + 6, boxY + 6 + row * 16); row++;
-      ctx.fillText(line3, boxX + 6, boxY + 6 + row * 16); row++;
-      if (hasSma20) { ctx.fillStyle = '#00BCD4'; ctx.fillText(line4, boxX + 6, boxY + 6 + row * 16); row++; }
-      if (hasSma50) { ctx.fillStyle = '#FFC107'; ctx.fillText(line5, boxX + 6, boxY + 6 + row * 16); row++; }
-      if (hasSma100) { ctx.fillStyle = '#E91E63'; ctx.fillText(line6, boxX + 6, boxY + 6 + row * 16); }
+      // draw cached lines
+      for (let i = 0; i < _popupCache.lineCount; i++) {
+        if (i === 4) ctx.fillStyle = '#00BCD4';
+        else if (i === 5) ctx.fillStyle = '#FFC107';
+        else if (i === 6) ctx.fillStyle = '#E91E63';
+        else ctx.fillStyle = '#222';
+        const text = _popupCache.lines[i];
+        if (text) ctx.fillText(text, boxX + 6, boxY + 6 + row * 16);
+        row++;
+      }
     }
   }
 }

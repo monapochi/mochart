@@ -663,7 +663,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -871,7 +871,16 @@ function __wbg_get_imports() {
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
-            const offset = table.grow(4);
+            let offset = 0;
+            try {
+                offset = table.grow(4);
+            } catch (err) {
+                // Some runtimes/load-orders can call this more than once with a
+                // fixed-size table. Reuse existing sentinel slots when available.
+                if (table.length < 4) {
+                    throw err;
+                }
+            }
             table.set(0, undefined);
             table.set(offset + 0, undefined);
             table.set(offset + 1, null);
