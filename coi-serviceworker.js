@@ -20,32 +20,72 @@
 
 /* ── Registration (runs in the main window context) ── */
 if (typeof window !== 'undefined') {
-  const RELOAD_FLAG = '__coi_reloaded__';
+  const RELOAD_COUNT_KEY = '__coi_reload_count__';
+  const MAX_RELOADS = 3;
+
+  function getReloadCount() {
+    try {
+      const raw = sessionStorage.getItem(RELOAD_COUNT_KEY);
+      return raw ? Number(raw) || 0 : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function setReloadCount(value) {
+    try {
+      sessionStorage.setItem(RELOAD_COUNT_KEY, String(value));
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function clearReloadCount() {
+    try {
+      sessionStorage.removeItem(RELOAD_COUNT_KEY);
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  function tryReload(reason) {
+    const count = getReloadCount();
+    if (count >= MAX_RELOADS) {
+      console.warn('[coi-serviceworker] max reload attempts reached; staying on page', { reason, count });
+      return;
+    }
+    setReloadCount(count + 1);
+    console.log('[coi-serviceworker] reloading for COI', { reason, attempt: count + 1, max: MAX_RELOADS });
+    window.location.reload();
+  }
 
   if (window.crossOriginIsolated) {
-    // Successfully isolated: clear the flag so future hard-reloads can recover.
-    try { sessionStorage.removeItem(RELOAD_FLAG); } catch (e) {}
+    // Successfully isolated: clear retry state.
+    clearReloadCount();
   } else if ('serviceWorker' in navigator) {
-    // Guard against infinite reload loops (SW activation can trigger multiple reloads).
     navigator.serviceWorker
-      .register(window.document.currentScript.src)
+      .register(window.document.currentScript?.src || 'coi-serviceworker.js')
       .then((reg) => {
         function awaitActivation(sw) {
           sw.addEventListener('statechange', () => {
             if (sw.state === 'activated' || sw.state === 'installed') {
-              if (!sessionStorage.getItem(RELOAD_FLAG)) {
-                sessionStorage.setItem(RELOAD_FLAG, '1');
-                window.location.reload();
-              }
+              tryReload('statechange:' + sw.state);
             }
           });
         }
+
+        // If controller appears after first install, retry once more.
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          tryReload('controllerchange');
+        });
+
         if (reg.installing) {
           awaitActivation(reg.installing);
-        } else if (!sessionStorage.getItem(RELOAD_FLAG)) {
-          // SW already installed/activated from a previous visit — reload once.
-          sessionStorage.setItem(RELOAD_FLAG, '1');
-          window.location.reload();
+        } else if (reg.waiting) {
+          tryReload('waiting');
+        } else if (reg.active) {
+          // SW already active but page is not yet isolated.
+          tryReload('active-not-isolated');
         }
       })
       .catch((err) => {
