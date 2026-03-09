@@ -24,11 +24,15 @@
 // errors and surface them to the main thread. The static import previously
 // executed during module evaluation and could throw before our global
 // handlers were registered.
-const WORKER_BUILD_VERSION = '20260306c';
-const WASM_GLUE_VERSION = '20260306c';
+const WORKER_BUILD_VERSION = '20260309a';
+const WASM_GLUE_VERSION = '20260309a';
 const WASM_MODULE_PATHS = [
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+];
+const WASM_BINARY_PATHS = [
+  `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
+  `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
 ];
 let WasmModule = null; // will hold the imported module namespace
 let _wasmInitPromise = null; // ensures __wbg_init runs at most once per worker
@@ -367,7 +371,23 @@ async function ensureWasmInitialized() {
     return WasmModule;
   }
   if (!_wasmInitPromise) {
-    _wasmInitPromise = initFn();
+    _wasmInitPromise = (async () => {
+      let lastError = null;
+      for (let i = 0; i < WASM_BINARY_PATHS.length; i++) {
+        const candidate = new URL(WASM_BINARY_PATHS[i], import.meta.url).href;
+        try {
+          const response = await fetch(candidate);
+          if (!response.ok) {
+            lastError = new Error(`HTTP ${response.status} for ${candidate}`);
+            continue;
+          }
+          return await initFn({ module_or_path: response });
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError ?? new Error('failed to load mochart_wasm_new_bg.wasm');
+    })();
   }
   try {
     const wasmExports = await _wasmInitPromise;

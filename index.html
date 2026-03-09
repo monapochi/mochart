@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mochart — &asymp; Zero GC.</title>
-  <meta name="description" content="A financial charting library. 80k bars with &asymp; Zero GC via Rust WASM + WebGPU.">
+  <title>Mochart — ⇀ Zero GC.</title>
+  <meta name="description" content="A financial charting library aiming for ⇀ Zero GC via Rust WASM + WebGPU.">
   <link rel="icon" href="data:,">
-  <meta property="og:title" content="Mochart — &asymp; Zero GC.">
-  <meta property="og:description" content="80k bars with &asymp; Zero GC. WebGPU + Rust WASM financial charting.">
+  <meta property="og:title" content="Mochart — ⇀ Zero GC.">
+  <meta property="og:description" content="80k bars aiming for ⇀ Zero GC. WebGPU + Rust WASM financial charting.">
 
   <!-- SharedArrayBuffer needs COOP/COEP.
        GitHub Pages doesn't support custom headers, so we use a service worker. -->
@@ -505,7 +505,7 @@
 
   <div id="hero-stats">
     <div id="hero-tagline">
-      &asymp; Zero GC
+      ⇀ Zero GC
     </div>
     <p id="hero-sub">WebGPU + Rust WASM financial charting for the modern web.</p>
   </div>
@@ -699,7 +699,7 @@
   We must guard the module load to avoid executing before isolation is active.
 -->
 <script>
-  const LP_ASSET_VERSION = '20260306c';
+  const LP_ASSET_VERSION = '20260309a';
   if (window.crossOriginIsolated) {
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');

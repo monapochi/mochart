@@ -713,7 +713,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -856,7 +856,7 @@ export function init_winit_canvas(canvas_id) {
  * @param {number} kind
  */
 export function overlay_add_kind(kind) {
-    wasm.mochart_overlay_add_kind(kind);
+    wasm.overlay_add_kind(kind);
 }
 
 /**
@@ -876,7 +876,7 @@ export function overlay_kind_mask(marker_count, hline_count, zone_count, text_co
  * @returns {number}
  */
 export function overlay_pack_state_std430_ptr() {
-    const ret = wasm.mochart_overlay_pack_state_std430();
+    const ret = wasm.overlay_pack_state_std430_ptr();
     return ret >>> 0;
 }
 
@@ -889,7 +889,7 @@ export function overlay_pack_state_std430_ptr() {
  * @returns {number}
  */
 export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count) {
-    const ret = wasm.mochart_overlay_pack_std430(marker_count, hline_count, zone_count, text_count, event_count);
+    const ret = wasm.overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count);
     return ret >>> 0;
 }
 
@@ -897,18 +897,18 @@ export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, t
  * @param {number} kind
  */
 export function overlay_remove_kind(kind) {
-    wasm.mochart_overlay_remove_kind(kind);
+    wasm.overlay_remove_kind(kind);
 }
 
 export function overlay_reset_state() {
-    wasm.mochart_overlay_reset_state();
+    wasm.overlay_reset_state();
 }
 
 /**
  * @returns {number}
  */
 export function overlay_std430_layout_align() {
-    const ret = wasm.mochart_overlay_std430_layout_align();
+    const ret = wasm.overlay_std430_layout_align();
     return ret >>> 0;
 }
 
@@ -916,7 +916,7 @@ export function overlay_std430_layout_align() {
  * @returns {number}
  */
 export function overlay_std430_layout_bytes() {
-    const ret = wasm.mochart_overlay_std430_layout_bytes();
+    const ret = wasm.overlay_std430_layout_bytes();
     return ret >>> 0;
 }
 
@@ -924,7 +924,7 @@ export function overlay_std430_layout_bytes() {
  * @returns {number}
  */
 export function overlay_std430_ptr() {
-    const ret = wasm.mochart_overlay_std430_ptr();
+    const ret = wasm.overlay_std430_ptr();
     return ret >>> 0;
 }
 
@@ -946,7 +946,7 @@ export function overlay_total_count(marker_count, hline_count, zone_count, text_
  * @param {number} next_kind
  */
 export function overlay_update_kind(prev_kind, next_kind) {
-    wasm.mochart_overlay_update_kind(prev_kind, next_kind);
+    wasm.overlay_update_kind(prev_kind, next_kind);
 }
 
 function __wbg_get_imports() {
