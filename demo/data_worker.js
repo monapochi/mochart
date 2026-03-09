@@ -24,8 +24,8 @@
 // errors and surface them to the main thread. The static import previously
 // executed during module evaluation and could throw before our global
 // handlers were registered.
-const WORKER_BUILD_VERSION = '20260309a';
-const WASM_GLUE_VERSION = '20260309a';
+const WORKER_BUILD_VERSION = '20260309b';
+const WASM_GLUE_VERSION = '20260309b';
 const WASM_MODULE_PATHS = [
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,

@@ -52,9 +52,9 @@ const indSab    = allocIndSab(EP_ARENA_F32);
 
 // ── Workers ──────────────────────────────────────────────────────────────
 // import.meta.url を基準に絶対URL文字列を生成して Worker に渡す (末尾スラッシュ問題の回避)
-const LP_BUILD_VERSION = '20260309a';
-const WORKER_VERSION = '20260309a';
-const WASM_GLUE_VERSION = '20260309a';
+const LP_BUILD_VERSION = '20260309b';
+const WORKER_VERSION = '20260309b';
+const WASM_GLUE_VERSION = '20260309b';
 console.log(
   '[lp_host] build |',
   `lp=${LP_BUILD_VERSION}`,

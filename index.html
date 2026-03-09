@@ -11,7 +11,7 @@
 
   <!-- SharedArrayBuffer needs COOP/COEP.
        GitHub Pages doesn't support custom headers, so we use a service worker. -->
-  <script src="coi-serviceworker.js?v=20260309a"></script>
+  <script src="coi-serviceworker.js?v=20260309b"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -699,7 +699,7 @@
   We must guard the module load to avoid executing before isolation is active.
 -->
 <script>
-  const LP_ASSET_VERSION = '20260309a';
+  const LP_ASSET_VERSION = '20260309b';
   if (window.crossOriginIsolated) {
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');

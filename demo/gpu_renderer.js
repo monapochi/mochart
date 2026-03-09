@@ -175,6 +175,7 @@ export class GpuRenderer {
   /** @type {Float32Array|null} */ _fbSma20 = null;
   /** @type {Float32Array|null} */ _fbSma50 = null;
   /** @type {Float32Array|null} */ _fbSma100 = null;
+  /** @type {boolean} */ _hasLegacySmaFrameChannels = false;
 
   // Timestamp query resources
   /** @type {GPUQuerySet|null} */ timestampQuerySet = null;
@@ -432,7 +433,7 @@ export class GpuRenderer {
     // Upload CPU-precomputed SMA values from frameBuf (SAB) into GPU buffers.
     // Skipped when the EP pipeline is active (indSab set) — the arena carries
     // all indicator data and the legacy per-period buffers are not needed.
-    if (!this.indSab) {
+    if (!this.indSab && this._hasLegacySmaFrameChannels) {
       try {
         if (flags & 1) this._uploadSmaToBuf(viewLen, FBUF_SMA20_OFF,  frameBuf);
         if (flags & 2) this._uploadSmaToBuf(viewLen, FBUF_SMA50_OFF,  frameBuf);
@@ -519,7 +520,7 @@ export class GpuRenderer {
     if (this.indSab) {
       // EP pipeline: arena-driven draw loop (replaces legacy per-SMA calls).
       this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, visBc, offsetSlots);
-    } else {
+    } else if (this._hasLegacySmaFrameChannels) {
       // Legacy SMA overlay — used when indSab is not set (no EP integration).
       // nanStart heuristic: bars before (period-1) have incomplete history.
       if (flags & 1) this._drawSmaLine(FBUF_SMA20_OFF,  viewLen, Math.max(0, 20  - 1 - startBar), plotW, mainH, candleW, paddedMin, paddedMax, 0.00, 0.56, 0.73, 1.0, DPR * 1.5, visBc);
@@ -667,9 +668,17 @@ export class GpuRenderer {
     this._fbLow   = new Float32Array(fbuf, FBUF_LOW_OFF,   FRAME_MAX_BARS);
     this._fbClose = new Float32Array(fbuf, FBUF_CLOSE_OFF, FRAME_MAX_BARS);
     this._fbVol   = new Float32Array(fbuf, FBUF_VOL_OFF,   FRAME_MAX_BARS);
-    this._fbSma20  = new Float32Array(fbuf, FBUF_SMA20_OFF, FRAME_MAX_BARS);
-    this._fbSma50  = new Float32Array(fbuf, FBUF_SMA50_OFF, FRAME_MAX_BARS);
-    this._fbSma100 = new Float32Array(fbuf, FBUF_SMA100_OFF, FRAME_MAX_BARS);
+    const legacySmaBytes = FBUF_SMA100_OFF + FRAME_MAX_BARS * 4;
+    this._hasLegacySmaFrameChannels = fbuf.byteLength >= legacySmaBytes;
+    if (this._hasLegacySmaFrameChannels) {
+      this._fbSma20  = new Float32Array(fbuf, FBUF_SMA20_OFF, FRAME_MAX_BARS);
+      this._fbSma50  = new Float32Array(fbuf, FBUF_SMA50_OFF, FRAME_MAX_BARS);
+      this._fbSma100 = new Float32Array(fbuf, FBUF_SMA100_OFF, FRAME_MAX_BARS);
+    } else {
+      this._fbSma20 = null;
+      this._fbSma50 = null;
+      this._fbSma100 = null;
+    }
   }
 
   /**
@@ -685,6 +694,10 @@ export class GpuRenderer {
     for (const { buf } of this.smaLineBufs.values()) buf.destroy();
     this.smaLineBufs.clear();
     if (this.lineUniBuf) { this.lineUniBuf.destroy(); this.lineUniBuf = null; }
+    this._fbSma20 = null;
+    this._fbSma50 = null;
+    this._fbSma100 = null;
+    this._hasLegacySmaFrameChannels = false;
   }
 
   /**
@@ -1106,6 +1119,7 @@ export class GpuRenderer {
     const src = smaByteOff === FBUF_SMA20_OFF ? this._fbSma20
       : smaByteOff === FBUF_SMA50_OFF ? this._fbSma50
       : this._fbSma100;
+    if (!src) return;
     queue.writeBuffer(entry.buf, 0, src, 0, viewLen);
   }
 
