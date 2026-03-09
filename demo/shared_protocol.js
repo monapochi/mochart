@@ -45,6 +45,7 @@ export const FLAGS     = 8;
  * Both zero → Worker received a spurious wake (should not occur), skip frame.
  */
 export const DIRTY     = 9;
+export const SUBPIXEL_PAN_X = 10;
 export const GPU_DIRTY = 1;  // bit 0
 export const HUD_DIRTY = 2;  // bit 1
 
@@ -81,6 +82,20 @@ export function i32ToF32(i) {
  */
 export function allocCtrlBuf(n = 1) {
   return new SharedArrayBuffer(STRIDE * 4 * n);
+}
+
+/**
+ * Build a slot-scoped SAB descriptor shared by data/render workers.
+ * This is the single source of truth for multiplexed slot routing.
+ */
+export function makeSlotDescriptor(slotId, ctrlBuf, frameCtrl, frameBuf, indSab) {
+  return {
+    slotId: (slotId | 0) >>> 0,
+    ctrl: ctrlBuf,
+    frameCtrl,
+    frameBuf,
+    indSab,
+  };
 }
 
 // ── Frame SAB (data_worker → render_worker, zero-copy SoA transfer) ──────
@@ -127,7 +142,8 @@ export const FBUF_DIRTY_START = 76; // u32 — dirty range start bar
 // vec4<u32> #5 (bytes 80-95)
 export const FBUF_DIRTY_END      = 80;  // u32 — dirty range end bar
 export const FBUF_INDICATOR_GEN  = 84;  // u32 — indicator generation counter
-// bytes 88-127 reserved
+export const FBUF_FRAME_START_BAR = 88;  // u32 — actual first bar copied into frameBuf
+// bytes 92-127 reserved
 
 export const FBUF_HDR_BYTES = 128;
 
@@ -194,6 +210,12 @@ export const INDSAB_SEQ_OFF   = 0;   // u32 — monotone seq; render_worker Atom
 export const INDSAB_ARENA_LEN = 4;   // u32 — f32 count written into the arena section
 export const INDSAB_CMD_COUNT = 8;   // u32 — number of render commands
 export const INDSAB_REVISION  = 12;  // u32 — plan revision; render_worker rebuilds pipelines if changed
+
+// Overlay HUD summary (std430 u32[8]) packed by data_worker via Rust scratch.
+// Kept in indSAB header so render_worker can read without message-object cloning.
+export const INDSAB_OVERLAY_STD430_OFF = 3072;
+export const INDSAB_OVERLAY_STD430_WORDS = 8;
+export const INDSAB_OVERLAY_REV_OFF = INDSAB_OVERLAY_STD430_OFF + INDSAB_OVERLAY_STD430_WORDS * 4;
 
 /** Maximum number of render commands (= max indicator slots × sub-slots). */
 export const MAX_RENDER_CMDS  = 32;

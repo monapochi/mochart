@@ -22,6 +22,13 @@ export class ChartViewport {
         return ret >>> 0;
     }
     /**
+     * @returns {boolean}
+     */
+    is_at_right_edge() {
+        const ret = wasm.chartviewport_is_at_right_edge(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * 新規ビューポートを作成する。
      *
      * - `visible_bars` はデータ全体の末尾から数えた初期表示数。
@@ -37,14 +44,30 @@ export class ChartViewport {
         return this;
     }
     /**
+     * バー単位で直接パンする。
+     *
+     * ホイール補助や外部 API の整数バー移動用。端数は保持しない。
+     * @param {number} delta_bars
+     */
+    pan_bars(delta_bars) {
+        wasm.chartviewport_pan_bars(this.__wbg_ptr, delta_bars);
+    }
+    /**
      * ポインタ移動による水平パン（CSS ピクセル差分、右移動が正）。
      *
-     * `delta_px > 0` → 過去方向へスクロール（start_bar 減少）。
-     * `delta_px < 0` → 未来方向へスクロール（start_bar 増加）。
+     * `delta_px > 0` → 未来方向へスクロール（start_bar 増加）。
+     * `delta_px < 0` → 過去方向へスクロール（start_bar 減少）。
      * @param {number} delta_px
      */
     pan_px(delta_px) {
         wasm.chartviewport_pan_px(this.__wbg_ptr, delta_px);
+    }
+    /**
+     * @returns {number}
+     */
+    pan_remainder_px() {
+        const ret = wasm.chartviewport_pan_remainder_px(this.__wbg_ptr);
+        return ret;
     }
     /**
      * @returns {number}
@@ -68,6 +91,18 @@ export class ChartViewport {
         wasm.chartviewport_set_total_bars(this.__wbg_ptr, n);
     }
     /**
+     * ビューポートを直接設定する。
+     *
+     * - `start_bar` は clamp される
+     * - `visible_bars` は `[1, total_bars.max(1)]` に clamp される
+     * - サブピクセル端数はリセットされる
+     * @param {number} start_bar
+     * @param {number} visible_bars
+     */
+    set_viewport(start_bar, visible_bars) {
+        wasm.chartviewport_set_viewport(this.__wbg_ptr, start_bar, visible_bars);
+    }
+    /**
      * @returns {number}
      */
     start_bar() {
@@ -89,7 +124,7 @@ export class ChartViewport {
      * - `plot_height_px`: プロット領域の高さ (CSS px)
      *
      * 値を WASM メモリ上の配列に書き込む（JS 側オブジェクト生成を回避）。
-     * `crosshair_out_ptr` から `[f64; 4]` を読んでください。
+     * `crosshair_out_ptr` から `[f64; 6]` を読んでください。
      * @param {number} x_px
      * @param {number} y_px
      * @param {number} price_min
@@ -98,6 +133,21 @@ export class ChartViewport {
      */
     update_crosshair(x_px, y_px, price_min, price_max, plot_height_px) {
         wasm.chartviewport_update_crosshair(this.__wbg_ptr, x_px, y_px, price_min, price_max, plot_height_px);
+    }
+    /**
+     * `update_crosshair` に加えて、現在の frame window 内 local index を返す。
+     *
+     * JS 側で `bar_idx - frame_start_bar` を毎回計算しないための補助 API。
+     * @param {number} x_px
+     * @param {number} y_px
+     * @param {number} price_min
+     * @param {number} price_max
+     * @param {number} plot_height_px
+     * @param {number} frame_start_bar
+     * @param {number} view_len
+     */
+    update_crosshair_frame(x_px, y_px, price_min, price_max, plot_height_px, frame_start_bar, view_len) {
+        wasm.chartviewport_update_crosshair_frame(this.__wbg_ptr, x_px, y_px, price_min, price_max, plot_height_px, frame_start_bar, view_len);
     }
     /**
      * @returns {number}
@@ -663,7 +713,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -800,6 +850,103 @@ export function init_winit_canvas(canvas_id) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {number} kind
+ */
+export function overlay_add_kind(kind) {
+    wasm.mochart_overlay_add_kind(kind);
+}
+
+/**
+ * @param {number} marker_count
+ * @param {number} hline_count
+ * @param {number} zone_count
+ * @param {number} text_count
+ * @param {number} event_count
+ * @returns {number}
+ */
+export function overlay_kind_mask(marker_count, hline_count, zone_count, text_count, event_count) {
+    const ret = wasm.overlay_kind_mask(marker_count, hline_count, zone_count, text_count, event_count);
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function overlay_pack_state_std430_ptr() {
+    const ret = wasm.mochart_overlay_pack_state_std430();
+    return ret >>> 0;
+}
+
+/**
+ * @param {number} marker_count
+ * @param {number} hline_count
+ * @param {number} zone_count
+ * @param {number} text_count
+ * @param {number} event_count
+ * @returns {number}
+ */
+export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count) {
+    const ret = wasm.mochart_overlay_pack_std430(marker_count, hline_count, zone_count, text_count, event_count);
+    return ret >>> 0;
+}
+
+/**
+ * @param {number} kind
+ */
+export function overlay_remove_kind(kind) {
+    wasm.mochart_overlay_remove_kind(kind);
+}
+
+export function overlay_reset_state() {
+    wasm.mochart_overlay_reset_state();
+}
+
+/**
+ * @returns {number}
+ */
+export function overlay_std430_layout_align() {
+    const ret = wasm.mochart_overlay_std430_layout_align();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function overlay_std430_layout_bytes() {
+    const ret = wasm.mochart_overlay_std430_layout_bytes();
+    return ret >>> 0;
+}
+
+/**
+ * @returns {number}
+ */
+export function overlay_std430_ptr() {
+    const ret = wasm.mochart_overlay_std430_ptr();
+    return ret >>> 0;
+}
+
+/**
+ * @param {number} marker_count
+ * @param {number} hline_count
+ * @param {number} zone_count
+ * @param {number} text_count
+ * @param {number} event_count
+ * @returns {number}
+ */
+export function overlay_total_count(marker_count, hline_count, zone_count, text_count, event_count) {
+    const ret = wasm.overlay_total_count(marker_count, hline_count, zone_count, text_count, event_count);
+    return ret >>> 0;
+}
+
+/**
+ * @param {number} prev_kind
+ * @param {number} next_kind
+ */
+export function overlay_update_kind(prev_kind, next_kind) {
+    wasm.mochart_overlay_update_kind(prev_kind, next_kind);
 }
 
 function __wbg_get_imports() {
@@ -1108,7 +1255,7 @@ async function __wbg_init(module_or_path) {
     }
 
     if (module_or_path === undefined) {
-        module_or_path = new URL('mochart_wasm_new_bg.wasm', import.meta.url);
+        module_or_path = new URL(/* @vite-ignore */ 'mochart_wasm_new_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 

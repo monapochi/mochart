@@ -22,6 +22,19 @@
 if (typeof window !== 'undefined') {
   const RELOAD_COUNT_KEY = '__coi_reload_count__';
   const MAX_RELOADS = 3;
+  const ACTIVATED_MESSAGE_TYPE = 'coi:activated';
+
+  function resolveServiceWorkerUrl() {
+    const currentScript = window.document.currentScript;
+    if (currentScript instanceof HTMLScriptElement && currentScript.src) {
+      return new URL(currentScript.src, window.location.href);
+    }
+    return new URL('coi-serviceworker.js', window.location.href);
+  }
+
+  function resolveServiceWorkerScope(scriptUrl) {
+    return new URL('./', scriptUrl).pathname;
+  }
 
   function getReloadCount() {
     try {
@@ -63,8 +76,24 @@ if (typeof window !== 'undefined') {
     // Successfully isolated: clear retry state.
     clearReloadCount();
   } else if ('serviceWorker' in navigator) {
+    const serviceWorkerUrl = resolveServiceWorkerUrl();
+    const serviceWorkerScope = resolveServiceWorkerScope(serviceWorkerUrl);
+
+    navigator.serviceWorker.addEventListener('message', (event) => {
+      const data = event.data;
+      if (!data || typeof data !== 'object') {
+        return;
+      }
+      if (data.type === ACTIVATED_MESSAGE_TYPE && !window.crossOriginIsolated) {
+        tryReload('message:activated');
+      }
+    });
+
     navigator.serviceWorker
-      .register(window.document.currentScript?.src || 'coi-serviceworker.js')
+      .register(serviceWorkerUrl.href, {
+        scope: serviceWorkerScope,
+        updateViaCache: 'none',
+      })
       .then((reg) => {
         function awaitActivation(sw) {
           sw.addEventListener('statechange', () => {
@@ -77,6 +106,22 @@ if (typeof window !== 'undefined') {
         // If controller appears after first install, retry once more.
         navigator.serviceWorker.addEventListener('controllerchange', () => {
           tryReload('controllerchange');
+        });
+
+        navigator.serviceWorker.ready
+          .then(() => {
+            if (!window.crossOriginIsolated) {
+              tryReload('ready-not-isolated');
+            }
+          })
+          .catch((err) => {
+            console.warn('[coi-serviceworker] navigator.serviceWorker.ready failed:', err);
+          });
+
+        window.addEventListener('pageshow', (event) => {
+          if (event.persisted && navigator.serviceWorker.controller && !window.crossOriginIsolated) {
+            tryReload('pageshow:persisted');
+          }
         });
 
         if (reg.installing) {
@@ -97,12 +142,18 @@ if (typeof window !== 'undefined') {
 /* ── Service Worker context ── */
 if (typeof self !== 'undefined' && typeof window === 'undefined') {
   // We're running as a service worker.
-  self.addEventListener('install', () => {
-    self.skipWaiting();
+  self.addEventListener('install', (ev) => {
+    ev.waitUntil(self.skipWaiting());
   });
 
   self.addEventListener('activate', (ev) => {
-    ev.waitUntil(self.clients.claim());
+    ev.waitUntil((async () => {
+      await self.clients.claim();
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (const client of clients) {
+        client.postMessage({ type: 'coi:activated' });
+      }
+    })());
   });
 
   /**

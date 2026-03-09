@@ -22,6 +22,68 @@ High-performance financial charting library for the web.
 npm install mochart
 ```
 
+## Fast Path By Default
+
+The recommended npm integration is the default path:
+
+```js
+import { createChart } from 'mochart';
+
+const chart = createChart(document.getElementById('chart'), {
+  data: ohlcvBars,
+  visibleBars: 120,
+  height: 420,
+});
+```
+
+This uses Mochart's worker-backed path without app-side worker construction.
+
+If a bundler has unusual worker URL rewriting, you can still inject workers explicitly:
+
+```js
+import { createChart } from 'mochart';
+import RenderWorker from 'mochart/worker/render?worker';
+import DataWorker from 'mochart/worker/data?worker';
+
+const chart = createChart(document.getElementById('chart'), {
+  data: ohlcvBars,
+  sharedRenderWorker: new RenderWorker({ type: 'module' }),
+  dataWorker: new DataWorker({ type: 'module' }),
+});
+```
+
+For a full runnable example, see `examples/npm-vanilla-sample/`.
+
+## WASM Asset Base Override
+
+Mochart resolves WASM assets automatically, but if your deployment copies the package files into a custom static asset folder, set a global base URL before the first chart is created.
+
+```js
+globalThis.__MOCHART_ASSET_BASE_URL__ = '/vendor/mochart/';
+```
+
+The directory should contain:
+
+- `mochart_wasm_bg.wasm`
+- `mochart_wasm_new_bg.wasm`
+
+If you use worker-backed rendering, your page must also serve COOP/COEP headers so `SharedArrayBuffer` is available:
+
+- `Cross-Origin-Opener-Policy: same-origin`
+- `Cross-Origin-Embedder-Policy: require-corp`
+
+For a local file dependency setup under Vite, add `server.fs.allow` entries for `dist/pkg` and `dist/demo`, because Vite otherwise blocks the symlinked WASM and worker files.
+
+## Sample Smoke Test
+
+To verify the npm vanilla sample end-to-end:
+
+```bash
+npm run verify:sample:npm-vanilla
+```
+
+This starts the Vite sample server on a free local port, opens the page with Puppeteer, waits for the chart canvases, and fails if page errors or console errors are detected.
+
 ## Quick Start
 
 ```typescript

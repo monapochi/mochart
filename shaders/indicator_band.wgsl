@@ -39,7 +39,7 @@ struct Uniforms {
     bar_count          : u32,         // offset 48
     slots              : u32,
     _pad1              : u32,
-    _pad2              : u32,
+    offset_slots       : f32,
 }
 
 @group(0) @binding(0) var<uniform>       u     : Uniforms;
@@ -112,7 +112,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     let logical_len = select(f32(u.bar_count), f32(slots), slots > 0u);
     let slot_w      = u.plot_w / logical_len;
     
-    let x           = f32(bar) * slot_w + slot_w * 0.5;  // horizontal centre of bar
+    let x           = (f32(bar) + 0.5 - u.offset_slots) * slot_w;
     let y           = (1.0 - (val - u.price_min) / price_range) * u.plot_h;
 
     out.pos   = vec4<f32>(x / u.plot_w * 2.0 - 1.0, 1.0 - y / u.plot_h * 2.0, 0.0, 1.0);

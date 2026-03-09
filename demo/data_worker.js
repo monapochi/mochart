@@ -26,14 +26,17 @@
 // handlers were registered.
 const WORKER_BUILD_VERSION = '20260306c';
 const WASM_GLUE_VERSION = '20260306c';
-const WASM_MODULE_PATH = `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`;
+const WASM_MODULE_PATHS = [
+  `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+  `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+];
 let WasmModule = null; // will hold the imported module namespace
 let _wasmInitPromise = null; // ensures __wbg_init runs at most once per worker
 let _workerInitState = 0; // 0=idle, 1=initializing, 2=ready
 
 import {
   STRIDE, WAKE, READY, START_BAR, VIS_BARS,
-  PLOT_W, PLOT_H, FLAGS,
+  PLOT_W, PLOT_H, FLAGS, SUBPIXEL_PAN_X,
   DIRTY, GPU_DIRTY, HUD_DIRTY,
   i32ToF32,
   FRAME_MAX_BARS,
@@ -41,6 +44,7 @@ import {
   FBUF_PRICE_MIN, FBUF_PRICE_MAX,
   FBUF_CANVAS_W, FBUF_CANVAS_H, FBUF_CANDLE_W,
   FBUF_FLAGS, FBUF_SEQ, FBUF_TOTAL_BARS,
+  FBUF_FRAME_START_BAR,
   FBUF_HDR_BYTES,
   FBUF_OPEN_OFF, FBUF_HIGH_OFF, FBUF_LOW_OFF, FBUF_CLOSE_OFF, FBUF_VOL_OFF,
   FBUF_TIME_OFF,
@@ -53,6 +57,7 @@ import {
   INDSAB_CMD_STYLE, INDSAB_CMD_PANE, INDSAB_CMD_BAND_ALT_OFF, INDSAB_CMD_LINE_WIDTH,
   INDSAB_CMD_FLAG_MASK, INDSAB_CMD_VALUE_MIN, INDSAB_CMD_VALUE_MAX,
   INDSAB_ARENA_OFF,
+  INDSAB_OVERLAY_STD430_OFF, INDSAB_OVERLAY_STD430_WORDS, INDSAB_OVERLAY_REV_OFF,
 } from './shared_protocol.js';
 
 // DPR is set from the main thread's init message (self.devicePixelRatio is
@@ -96,6 +101,8 @@ let frameSeq = 0;
 let _sma1 = 5;
 let _sma2 = 25;
 let _sma3 = 75;
+let _useLegacyDefaultIndicators = true;
+let _baseIndicators = [];
 
 // Dynamic indicators added from API messages.
 // Kept as logical configs; plan is rebuilt from this list when changed.
@@ -119,9 +126,23 @@ let _extraIndicators = [];
 /** @type {Map<string | number, number>} */
 let _extraClientToSlotId = new Map();
 
+/** @type {number} */ let workerSlotId = 0;
+
+// Annotation state keeps only id->kind in JS; aggregate counters live in Rust.
+const ANN_KIND_MARKER = 0;
+const ANN_KIND_HLINE = 1;
+const ANN_KIND_ZONE = 2;
+const ANN_KIND_TEXT = 3;
+const ANN_KIND_EVENT = 4;
+/** @type {Map<string, number>} */ const _annKindById = new Map();
+/** @type {number} */ let _overlayRevision = 0;
+/** @type {Uint32Array|null} */ let _overlayScratchWords = null;
+
 const KIND_TO_U8 = Object.freeze({ SMA: 0, EMA: 1, BB: 2, RSI: 3, MACD: 4, ATR: 5, OBV: 6, VOLUME: 7 });
 const STYLE_TO_U8 = Object.freeze({ LINE: 0, THICKLINE: 1, HISTOGRAM: 2, BAND: 3 });
 const PANE_TO_U8 = Object.freeze({ MAIN: 0, SUB1: 1, SUB2: 2 });
+/** @type {number} */ let _paneGapPx = 8;
+/** @type {number[]} */ let _paneWeights = [3, 1, 1];
 
 function _toKindU8(kind) {
   if (typeof kind === 'number') return kind & 0xff;
@@ -137,7 +158,14 @@ function _toStyleU8(style) {
 
 function _toPaneU8(pane) {
   if (typeof pane === 'number') return pane & 0xff;
-  if (typeof pane === 'string') return PANE_TO_U8[pane.toUpperCase()] ?? 0;
+  if (typeof pane === 'string') {
+    const mapped = PANE_TO_U8[pane.toUpperCase()];
+    if (mapped != null) return mapped;
+    if (pane.startsWith('pane-')) {
+      const idx = Number.parseInt(pane.slice(5), 10);
+      if (Number.isFinite(idx) && idx >= 0) return idx & 0xff;
+    }
+  }
   return 0;
 }
 
@@ -157,6 +185,123 @@ function _sanitizeExtraIndicator(msg) {
     signal: (msg.signal | 0) > 0 ? (msg.signal | 0) : undefined,
     stdDev: Number.isFinite(msg.stdDev) ? msg.stdDev : undefined,
   };
+}
+
+function _isForCurrentSlot(message) {
+  if (message == null || message.slotId == null) return true;
+  return ((message.slotId | 0) >>> 0) === workerSlotId;
+}
+
+function _decodeAnnotationKind(value) {
+  if (typeof value !== 'string') return ANN_KIND_EVENT;
+  const k = value.toLowerCase();
+  if (k === 'marker') return ANN_KIND_MARKER;
+  if (k === 'hline') return ANN_KIND_HLINE;
+  if (k === 'zone') return ANN_KIND_ZONE;
+  if (k === 'text') return ANN_KIND_TEXT;
+  return ANN_KIND_EVENT;
+}
+
+function _resetAnnState() {
+  _annKindById.clear();
+  if (WasmModule && typeof WasmModule.overlay_reset_state === 'function') {
+    WasmModule.overlay_reset_state();
+  }
+}
+
+function _syncAnnStatsToRustAndSab() {
+  if (!WasmModule || !wasmMemory || !indHdrView) return;
+  if (typeof WasmModule.overlay_pack_state_std430_ptr !== 'function') return;
+  const ptr = WasmModule.overlay_pack_state_std430_ptr();
+  if (!Number.isFinite(ptr) || ptr <= 0) return;
+
+  const wordBase = ptr >>> 2;
+  if (!_overlayScratchWords || _overlayScratchWords.buffer !== wasmMemory.buffer) {
+    _overlayScratchWords = new Uint32Array(wasmMemory.buffer);
+  }
+
+  for (let i = 0; i < INDSAB_OVERLAY_STD430_WORDS; i++) {
+    indHdrView.setUint32(INDSAB_OVERLAY_STD430_OFF + i * 4, _overlayScratchWords[wordBase + i] >>> 0, true);
+  }
+  _overlayRevision = (_overlayRevision + 1) >>> 0;
+  indHdrView.setUint32(INDSAB_OVERLAY_REV_OFF, _overlayRevision, true);
+}
+
+function _applyAnnAdd(message) {
+  const ann = message.annotation;
+  if (!ann || typeof ann !== 'object') return;
+
+  const nextKind = _decodeAnnotationKind(ann.type);
+  const id = typeof ann.id === 'string' ? ann.id : undefined;
+
+  if (id) {
+    const prevKind = _annKindById.get(id);
+    if (prevKind != null) {
+      if (typeof WasmModule.overlay_update_kind === 'function') {
+        WasmModule.overlay_update_kind(prevKind, nextKind);
+      }
+    } else if (typeof WasmModule.overlay_add_kind === 'function') {
+      WasmModule.overlay_add_kind(nextKind);
+    }
+    _annKindById.set(id, nextKind);
+  } else if (typeof WasmModule.overlay_add_kind === 'function') {
+    WasmModule.overlay_add_kind(nextKind);
+  }
+  _syncAnnStatsToRustAndSab();
+}
+
+function _applyAnnUpdate(message) {
+  const id = typeof message.id === 'string' ? message.id : undefined;
+  if (!id) return;
+  const prevKind = _annKindById.get(id);
+  if (prevKind == null) return;
+
+  const patch = message.patch;
+  if (!patch || typeof patch !== 'object' || !('type' in patch)) return;
+
+  const nextKind = _decodeAnnotationKind(patch.type);
+  if (nextKind === prevKind) return;
+
+  if (typeof WasmModule.overlay_update_kind === 'function') {
+    WasmModule.overlay_update_kind(prevKind, nextKind);
+  }
+  _annKindById.set(id, nextKind);
+  _syncAnnStatsToRustAndSab();
+}
+
+function _applyAnnRemove(message) {
+  const id = typeof message.id === 'string' ? message.id : undefined;
+  if (!id) return;
+  const prevKind = _annKindById.get(id);
+  if (prevKind == null) return;
+  _annKindById.delete(id);
+  if (typeof WasmModule.overlay_remove_kind === 'function') {
+    WasmModule.overlay_remove_kind(prevKind);
+  }
+  _syncAnnStatsToRustAndSab();
+}
+
+function _applyAnnBulk(message) {
+  const anns = Array.isArray(message.annotations) ? message.annotations : [];
+  _resetAnnState();
+
+  for (let i = 0; i < anns.length; i++) {
+    const ann = anns[i];
+    if (!ann || typeof ann !== 'object') continue;
+    const kind = _decodeAnnotationKind(ann.type);
+    const id = typeof ann.id === 'string' ? ann.id : undefined;
+    if (id) _annKindById.set(id, kind);
+    if (typeof WasmModule.overlay_add_kind === 'function') {
+      WasmModule.overlay_add_kind(kind);
+    }
+  }
+
+  _syncAnnStatsToRustAndSab();
+}
+
+function _applyAnnClear() {
+  _resetAnnState();
+  _syncAnnStatsToRustAndSab();
 }
 
 // ── Typed array views on frameBuf (set once at init, zero-alloc per frame) ──
@@ -191,14 +336,30 @@ function _refreshWasmViews() {
   const buf = wasmMemory.buffer;
   if (buf !== _lastWasmBuf) {
     _lastWasmBuf = buf;
+    // @zero_alloc_allow: Recreate cached views only after wasm memory.grow detaches the previous buffer.
     _wasmF32 = new Float32Array(buf);
+    // @zero_alloc_allow: Recreate cached views only after wasm memory.grow detaches the previous buffer.
     _wasmF64 = new Float64Array(buf);
   }
 }
 
 async function ensureWasmInitialized() {
   if (!WasmModule) {
-    WasmModule = await import(WASM_MODULE_PATH);
+    let loaded = null;
+    let lastError = null;
+    for (let i = 0; i < WASM_MODULE_PATHS.length; i++) {
+      const candidate = new URL(WASM_MODULE_PATHS[i], import.meta.url).href;
+      try {
+        loaded = await import(candidate);
+        break;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (!loaded) {
+      throw lastError ?? new Error('failed to import mochart_wasm_new.js');
+    }
+    WasmModule = loaded;
   }
   const initFn = WasmModule.default ?? WasmModule.init ?? null;
   if (!initFn) {
@@ -224,12 +385,24 @@ function buildPlan(sma1, sma2, sma3) {
     plan.free();
   }
   plan = new WasmModule.ExecutionPlan();
-  plan.add_indicator(/*SMA*/0, sma1, /*pane*/0, /*ThickLine*/1, 0.00, 0.56, 0.73, 1.0, 1.5);
-  plan.add_indicator(/*SMA*/0, sma2, /*pane*/0, /*ThickLine*/1, 1.00, 0.76, 0.03, 1.0, 1.5);
-  plan.add_indicator(/*SMA*/0, sma3, /*pane*/0, /*ThickLine*/1, 0.91, 0.12, 0.39, 1.0, 1.5);
-  plan.add_indicator(/*RSI*/3, 14,  /*pane*/1, /*ThickLine*/1, 0.61, 0.35, 0.71, 1.0, 1.5);
-  plan.add_indicator(/*MACD*/4, 12, /*pane*/1, /*ThickLine*/1, 0.16, 0.50, 0.73, 1.0, 1.5);
-  plan.add_indicator(/*Volume*/7, 0, /*pane*/2, /*Histogram*/2, 0.20, 0.60, 0.90, 0.8, 1.0);
+  if (_useLegacyDefaultIndicators) {
+    plan.add_indicator(/*SMA*/0, sma1, /*pane*/0, /*ThickLine*/1, 0.00, 0.56, 0.73, 1.0, 1.5);
+    plan.add_indicator(/*SMA*/0, sma2, /*pane*/0, /*ThickLine*/1, 1.00, 0.76, 0.03, 1.0, 1.5);
+    plan.add_indicator(/*SMA*/0, sma3, /*pane*/0, /*ThickLine*/1, 0.91, 0.12, 0.39, 1.0, 1.5);
+    plan.add_indicator(/*RSI*/3, 14,  /*pane*/1, /*ThickLine*/1, 0.61, 0.35, 0.71, 1.0, 1.5);
+    plan.add_indicator(/*MACD*/4, 12, /*pane*/1, /*ThickLine*/1, 0.16, 0.50, 0.73, 1.0, 1.5);
+    plan.add_indicator(/*Volume*/7, 0, /*pane*/2, /*Histogram*/2, 0.20, 0.60, 0.90, 0.8, 1.0);
+  } else {
+    for (let i = 0; i < _baseIndicators.length; i++) {
+      const base = _baseIndicators[i];
+      const slotId = plan.add_indicator(base.kind, base.period, base.pane, base.style, base.r, base.g, base.b, base.a, base.lineWidth);
+      if (base.kind === 4) {
+        plan.set_macd_params(slotId, base.period, base.slow ?? 26, base.signal ?? 9);
+      } else if (base.kind === 2 && Number.isFinite(base.stdDev)) {
+        plan.set_bb_params(slotId, base.stdDev);
+      }
+    }
+  }
 
   // Add dynamic extra indicators requested by API messages.
   _extraClientToSlotId.clear();
@@ -249,15 +422,121 @@ function buildPlan(sma1, sma2, sma3) {
   // Map slot_id → FLAGS bitmask (0 = always render).
   // This must match the order of add_indicator() calls above.
   slotFlagMask = new Uint32Array(64);
-  slotFlagMask[0] = 1;   // SMA1   → FLAGS bit 0
-  slotFlagMask[1] = 2;   // SMA2   → FLAGS bit 1
-  slotFlagMask[2] = 4;   // SMA3   → FLAGS bit 2
-  slotFlagMask[3] = 32;  // RSI14  → FLAGS bit 5 (0x20)
-  slotFlagMask[4] = 64;  // MACD   → FLAGS bit 6 (0x40)
-  slotFlagMask[5] = 128; // Volume → FLAGS bit 7 (0x80)
+  if (_useLegacyDefaultIndicators) {
+    slotFlagMask[0] = 1;
+    slotFlagMask[1] = 2;
+    slotFlagMask[2] = 4;
+    slotFlagMask[3] = 32;
+    slotFlagMask[4] = 64;
+    slotFlagMask[5] = 128;
+  }
 }
 
 self.onmessage = async (evt) => {
+  if (evt.data.type !== 'init' && !_isForCurrentSlot(evt.data)) {
+    return;
+  }
+
+  if (evt.data.type === 'ann_add') {
+    _applyAnnAdd(evt.data);
+    return;
+  }
+
+  if (evt.data.type === 'ann_update') {
+    _applyAnnUpdate(evt.data);
+    return;
+  }
+
+  if (evt.data.type === 'ann_remove') {
+    _applyAnnRemove(evt.data);
+    return;
+  }
+
+  if (evt.data.type === 'ann_bulk') {
+    _applyAnnBulk(evt.data);
+    return;
+  }
+
+  if (evt.data.type === 'ann_clear') {
+    _applyAnnClear();
+    return;
+  }
+
+  if (evt.data.type === 'pane_config') {
+    const nextGap = Number(evt.data.gap);
+    if (Number.isFinite(nextGap) && nextGap >= 0) {
+      _paneGapPx = nextGap;
+    }
+    const nextWeights = evt.data.weights;
+    if (Array.isArray(nextWeights) && nextWeights.length > 0) {
+      const clean = new Array(nextWeights.length);
+      for (let i = 0; i < nextWeights.length; i++) {
+        const w = Number(nextWeights[i]);
+        clean[i] = Number.isFinite(w) && w > 0 ? w : 1;
+      }
+      _paneWeights = clean;
+    }
+    return;
+  }
+
+  if (evt.data.type === 'set_data_binary') {
+    if (!WasmModule || !wasmMemory) return;
+    try {
+      const { store: nextStore, barCount } = ingestBinaryOhlcvBuffer(evt.data.data, wasmMemory);
+      if (store && store.free) store.free();
+      store = nextStore;
+      totalBars = barCount;
+      buildPlan(_sma1, _sma2, _sma3);
+      self.postMessage({ type: 'data_set', source: 'binary', bars: barCount });
+    } catch (err) {
+      self.postMessage({ type: 'error', message: `set_data_binary failed: ${String(err)}` });
+    }
+    return;
+  }
+
+  if (evt.data.type === 'set_data_soa') {
+    if (!WasmModule || !wasmMemory) return;
+    try {
+      const { store: nextStore, barCount } = ingestSoaPayload(evt.data, wasmMemory);
+      if (store && store.free) store.free();
+      store = nextStore;
+      totalBars = barCount;
+      buildPlan(_sma1, _sma2, _sma3);
+      self.postMessage({ type: 'data_set', source: 'soa', bars: barCount });
+    } catch (err) {
+      self.postMessage({ type: 'error', message: `set_data_soa failed: ${String(err)}` });
+    }
+    return;
+  }
+
+  if (evt.data.type === 'set_data_url') {
+    if (!WasmModule || !wasmMemory) return;
+    try {
+      const { url } = evt.data;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status}`);
+      const contentType = resp.headers.get('content-type') || '';
+
+      let next;
+      if (contentType.includes('application/json') || contentType.includes('text/json')) {
+        const json = await resp.json();
+        next = ingestJsonBars(json, wasmMemory);
+      } else {
+        const ab = await resp.arrayBuffer();
+        next = ingestBinaryOhlcvBuffer(ab, wasmMemory);
+      }
+
+      if (store && store.free) store.free();
+      store = next.store;
+      totalBars = next.barCount;
+      buildPlan(_sma1, _sma2, _sma3);
+      self.postMessage({ type: 'data_set', source: 'url', bars: next.barCount });
+    } catch (err) {
+      self.postMessage({ type: 'error', message: `set_data_url failed: ${String(err)}` });
+    }
+    return;
+  }
+
   if (evt.data.type === 'update_sma') {
     if (plan && WasmModule) {
       _sma1 = (evt.data.sma1 | 0) > 0 ? (evt.data.sma1 | 0) : _sma1;
@@ -279,7 +558,7 @@ self.onmessage = async (evt) => {
     else _extraIndicators.push(spec);
 
     buildPlan(_sma1, _sma2, _sma3);
-    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    const vis = Math.max(1, Atomics.load(ctrl, workerSlotId * STRIDE + VIS_BARS) || 200);
     plan.compile(vis);
 
     self.postMessage({ type: 'ep_added', id: spec.id, slotId: _extraClientToSlotId.get(spec.id) ?? -1 });
@@ -301,7 +580,7 @@ self.onmessage = async (evt) => {
     _extraIndicators[idx] = next;
 
     buildPlan(_sma1, _sma2, _sma3);
-    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    const vis = Math.max(1, Atomics.load(ctrl, workerSlotId * STRIDE + VIS_BARS) || 200);
     plan.compile(vis);
 
     self.postMessage({ type: 'ep_updated', id, slotId: _extraClientToSlotId.get(id) ?? -1 });
@@ -321,7 +600,7 @@ self.onmessage = async (evt) => {
     }
 
     buildPlan(_sma1, _sma2, _sma3);
-    const vis = Math.max(1, Atomics.load(ctrl, 0 * STRIDE + VIS_BARS) || 200);
+    const vis = Math.max(1, Atomics.load(ctrl, workerSlotId * STRIDE + VIS_BARS) || 200);
     plan.compile(vis);
 
     self.postMessage({ type: 'ep_removed', id });
@@ -336,13 +615,25 @@ self.onmessage = async (evt) => {
   if (_workerInitState === 1) return;
   _workerInitState = 1;
 
-  const { ctrl: ctrlBuf, frameCtrl: frameCtrlBuf, frameBuf, indSab: indSabBuf } = evt.data;
+  const descriptor = evt.data.descriptor ?? {
+    slotId: 0,
+    ctrl: evt.data.ctrl,
+    frameCtrl: evt.data.frameCtrl,
+    frameBuf: evt.data.frameBuf,
+    indSab: evt.data.indSab,
+  };
+  workerSlotId = ((descriptor.slotId | 0) >>> 0);
+  const ctrlBuf = descriptor.ctrl;
+  const frameCtrlBuf = descriptor.frameCtrl;
+  const frameBuf = descriptor.frameBuf;
+  const indSabBuf = descriptor.indSab;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
     DPR = Math.ceil(evt.data.dpr);
   }
   console.log(
     '[data_worker] init |',
+    `slot=${workerSlotId}`,
     `dpr=${DPR}`,
     `worker=${WORKER_BUILD_VERSION}`,
     `wasmGlue=${WASM_GLUE_VERSION}`,
@@ -354,6 +645,7 @@ self.onmessage = async (evt) => {
   indSab    = indSabBuf;
   fdbView   = new DataView(frameBuf, 0, FBUF_HDR_BYTES);
   indHdrView = new DataView(indSab);
+  _overlayRevision = 0;
 
   // Pre-allocate max-capacity destination views — created once, reused every frame.
   _dstOpen  = new Float32Array(frameSAB, FBUF_OPEN_OFF,  FRAME_MAX_BARS);
@@ -367,23 +659,40 @@ self.onmessage = async (evt) => {
     // 1. Dynamically import and initialize WASM module (exactly once per worker)
     await ensureWasmInitialized();
 
+    _useLegacyDefaultIndicators = evt.data.skipDefaultIndicators !== true;
+    _baseIndicators = [];
+    if (!_useLegacyDefaultIndicators && Array.isArray(evt.data.initialIndicators)) {
+      for (let i = 0; i < evt.data.initialIndicators.length; i++) {
+        _baseIndicators.push(_sanitizeExtraIndicator({
+          ...evt.data.initialIndicators[i],
+          id: `base_${i}`,
+        }));
+      }
+    }
+
     // 2. Fetch OHLCV binary and ingest (uses WasmModule.OhlcvStore)
-    const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin', wasmMemory);
-    store     = s;
-    totalBars = barCount;
-    console.log(`[data_worker] ingested ${barCount} bars`);
+    if (evt.data.skipDefaultData === true) {
+      store = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
+      totalBars = 0;
+    } else {
+      const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin', wasmMemory);
+      store     = s;
+      totalBars = barCount;
+      console.log(`[data_worker] ingested ${barCount} bars`);
+    }
 
     // 3. Create ExecutionPlan with indicators.
     //    SMA 1/2/3 mirror the existing FLAGS bit 0/1/2 toggles.
     //    RSI(14) on Sub1, MACD(12,26,9) on Sub1 — new FLAGS bits 5/6.
     //    Kind: SMA=0, EMA=1, BB=2, RSI=3, MACD=4, ATR=5, OBV=6
     //    Style: Line=0, ThickLine=1, Histogram=2, Band=3
-    buildPlan(5, 25, 75);
+    buildPlan(_sma1, _sma2, _sma3);
+    _syncAnnStatsToRustAndSab();
     console.log('[data_worker] ExecutionPlan compiled |',
       'slots:', plan.slot_count(), '| revision:', plan.revision());
 
     // 4. Report ready
-    self.postMessage({ type: 'ready', bars: barCount });
+    self.postMessage({ type: 'ready', bars: totalBars });
 
     // 5. Begin data loop
     _workerInitState = 2;
@@ -396,8 +705,9 @@ self.onmessage = async (evt) => {
 };
 
 // ── Data loop ─────────────────────────────────────────────────────────────
+/** @zero_alloc */
 async function dataLoop() {
-  const ci = 0;
+  const ci = workerSlotId;
   let lastWake = 0;
 
   while (true) {
@@ -415,6 +725,7 @@ async function dataLoop() {
     const plotW    = i32ToF32(Atomics.load(ctrl, ci * STRIDE + PLOT_W));
     const plotH    = i32ToF32(Atomics.load(ctrl, ci * STRIDE + PLOT_H));
     const flags    = Atomics.load(ctrl, ci * STRIDE + FLAGS);
+    const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
 
     if (plotW < 4 || plotH < 4 || visBars < 1) continue;
 
@@ -422,7 +733,10 @@ async function dataLoop() {
     const physH = Math.round(plotH * DPR);
 
     // ── Decompress view window ──────────────────────────────────────────
-    store.decompress_view_window(startBar, visBars);
+    const hasSubpixelPan = Math.abs(panOffsetPx) > 1e-3;
+    const frameStartBar = hasSubpixelPan ? Math.max(0, startBar - 1) : startBar;
+    const frameVisibleBars = hasSubpixelPan ? Math.min(FRAME_MAX_BARS, visBars + 2) : visBars;
+    store.decompress_view_window(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
 
     // Candle width: 80% of slot in physical pixels, clamped [2px, 40px]
@@ -475,6 +789,7 @@ async function dataLoop() {
     fdbView.setUint32 (FBUF_START_BAR,  startBar,  true);
     fdbView.setUint32 (FBUF_VIS_BARS,   visBars,   true);
     fdbView.setUint32 (FBUF_VIEW_LEN,   viewLen2,  true);
+    fdbView.setUint32 (FBUF_FRAME_START_BAR, frameStartBar, true);
     fdbView.setFloat32(FBUF_PRICE_MIN,  priceMin,  true);
     fdbView.setFloat32(FBUF_PRICE_MAX,  priceMax,  true);
     fdbView.setFloat32(FBUF_CANVAS_W,   physW,     true);
@@ -516,6 +831,7 @@ function _writeIndSab(_visBars, revision) {
     const arenaIdx  = arenaPtr >> 2;  // byte → f32 element index
     _refreshWasmViews();
     if (arenaLen > _dstArenaCap) {
+      // @zero_alloc_allow: Arena destination view is recreated only when plan output grows after recompile.
       _dstArena    = new Float32Array(indSab, INDSAB_ARENA_OFF, arenaLen);
       _dstArenaCap = arenaLen;
     }
@@ -587,6 +903,104 @@ async function loadBinaryOhlcv(url, memory) {
   newStore.free_ingest_buffers();
 
   return { store: newStore, barCount: N };
+}
+
+function ingestBinaryOhlcvBuffer(ab, memory) {
+  const N = new Uint32Array(ab, 0, 1)[0] || 0;
+  if (N <= 0) {
+    const emptyStore = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
+    return { store: emptyStore, barCount: 0 };
+  }
+
+  const OFF_TIME   = 8;
+  const OFF_OPEN   = 8 + N * 8;
+  const OFF_HIGH   = OFF_OPEN   + N * 4;
+  const OFF_LOW    = OFF_HIGH   + N * 4;
+  const OFF_CLOSE  = OFF_LOW    + N * 4;
+  const OFF_VOLUME = OFF_CLOSE  + N * 4;
+
+  const srcClose = new Float32Array(ab, OFF_CLOSE, N);
+  const tickSize = estimateTickSize(srcClose);
+  const basePrice = srcClose[0] ?? 100.0;
+
+  const nextStore = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
+
+  new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), N).set(new Float64Array(ab, OFF_TIME, N));
+  new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), N).set(new Float32Array(ab, OFF_OPEN, N));
+  new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), N).set(new Float32Array(ab, OFF_HIGH, N));
+  new Float32Array(memory.buffer, nextStore.ingest_low_ptr(), N).set(new Float32Array(ab, OFF_LOW, N));
+  new Float32Array(memory.buffer, nextStore.ingest_close_ptr(), N).set(srcClose);
+  new Float32Array(memory.buffer, nextStore.ingest_volume_ptr(), N).set(new Float32Array(ab, OFF_VOLUME, N));
+
+  nextStore.commit_ingestion(N);
+  nextStore.free_ingest_buffers();
+  return { store: nextStore, barCount: N };
+}
+
+function ingestSoaPayload(payload, memory) {
+  const N = (payload.count | 0) >>> 0;
+  if (N === 0) {
+    const emptyStore = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
+    return { store: emptyStore, barCount: 0 };
+  }
+
+  const time = new Float64Array(payload.time);
+  const open = new Float32Array(payload.open);
+  const high = new Float32Array(payload.high);
+  const low = new Float32Array(payload.low);
+  const close = new Float32Array(payload.close);
+  const volume = new Float32Array(payload.volume);
+
+  const tickSize = estimateTickSize(close);
+  const basePrice = close[0] ?? 100.0;
+  const nextStore = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
+
+  new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), N).set(time.subarray(0, N));
+  new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), N).set(open.subarray(0, N));
+  new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), N).set(high.subarray(0, N));
+  new Float32Array(memory.buffer, nextStore.ingest_low_ptr(), N).set(low.subarray(0, N));
+  new Float32Array(memory.buffer, nextStore.ingest_close_ptr(), N).set(close.subarray(0, N));
+  new Float32Array(memory.buffer, nextStore.ingest_volume_ptr(), N).set(volume.subarray(0, N));
+
+  nextStore.commit_ingestion(N);
+  nextStore.free_ingest_buffers();
+  return { store: nextStore, barCount: N };
+}
+
+function ingestJsonBars(json, memory) {
+  const arr = Array.isArray(json) ? json : [];
+  const N = arr.length;
+  const time = new Float64Array(N);
+  const open = new Float32Array(N);
+  const high = new Float32Array(N);
+  const low = new Float32Array(N);
+  const close = new Float32Array(N);
+  const volume = new Float32Array(N);
+
+  const isTuple = N > 0 && Array.isArray(arr[0]);
+  for (let i = 0; i < N; i++) {
+    if (isTuple) {
+      const t = arr[i];
+      const tv = Number(t[0] ?? 0);
+      time[i] = tv < 1e12 ? tv * 1000 : tv;
+      open[i] = Number(t[1] ?? 0);
+      high[i] = Number(t[2] ?? 0);
+      low[i] = Number(t[3] ?? 0);
+      close[i] = Number(t[4] ?? 0);
+      volume[i] = Number(t[5] ?? 0);
+    } else {
+      const o = arr[i] ?? {};
+      const tv = Number(o.time ?? 0);
+      time[i] = tv < 1e12 ? tv * 1000 : tv;
+      open[i] = Number(o.open ?? 0);
+      high[i] = Number(o.high ?? 0);
+      low[i] = Number(o.low ?? 0);
+      close[i] = Number(o.close ?? 0);
+      volume[i] = Number(o.volume ?? 0);
+    }
+  }
+
+  return ingestSoaPayload({ count: N, time: time.buffer, open: open.buffer, high: high.buffer, low: low.buffer, close: close.buffer, volume: volume.buffer }, memory);
 }
 
 function estimateTickSize(closes) {

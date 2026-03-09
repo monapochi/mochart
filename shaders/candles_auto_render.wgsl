@@ -18,7 +18,7 @@
 //
 // Uniforms (96 B):
 //   offset  0: pw (f32), cw (f32), total_len (u32), start_index (u32)
-//   offset 16: visible_count (u32), ph (f32), border_width (f32), _pad (u32)
+//   offset 16: visible_count (u32), ph (f32), border_width (f32), offset_slots (f32)
 //   offset 32: bull_color, bear_color, wick_color, border_color  (4×vec4<f32>)
 
 struct Uniforms {
@@ -29,7 +29,7 @@ struct Uniforms {
     visible_count: u32,
     ph           : f32,
     border_width : f32,
-    _pad         : u32,
+    offset_slots : f32,
     bull_color   : vec4<f32>,
     bear_color   : vec4<f32>,
     wick_color   : vec4<f32>,
@@ -124,9 +124,8 @@ fn vs_main(
 
     let y  = (y_price - pmin) * pr_inv * 2.0 - 1.0;
     
-    let slots = u._pad;
-    let logical_len = select(f32(u.visible_count), f32(slots), slots > 0u);
-    let cx = (f32(ii) + 0.5) * (u.pw / logical_len);
+    let logical_len = max(f32(u.visible_count), 1.0);
+    let cx = (f32(ii) + 0.5 - u.offset_slots) * (u.pw / logical_len);
     
     let x  = (cx + x_off) / u.pw * 2.0 - 1.0;
 

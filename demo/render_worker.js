@@ -18,11 +18,11 @@
 import { GpuRenderer } from './gpu_renderer.js';
 import {
   STRIDE, WAKE, READY, DIRTY, GPU_DIRTY, HUD_DIRTY,
-  PLOT_W, PLOT_H, POINTER_X, POINTER_Y,
+  PLOT_W, PLOT_H, POINTER_X, POINTER_Y, SUBPIXEL_PAN_X,
   i32ToF32,
   FRAME_MAX_BARS,
   FBUF_HDR_BYTES,
-  FBUF_VIEW_LEN, FBUF_VIS_BARS, FBUF_START_BAR,
+  FBUF_VIEW_LEN, FBUF_VIS_BARS, FBUF_START_BAR, FBUF_FRAME_START_BAR,
   FBUF_CANVAS_W, FBUF_CANVAS_H,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX, FBUF_FLAGS,
   FBUF_TIME_OFF, FBUF_OPEN_OFF, FBUF_HIGH_OFF, FBUF_LOW_OFF, FBUF_CLOSE_OFF, FBUF_VOL_OFF,
@@ -31,9 +31,8 @@ import {
   INDSAB_CMD_BASE, INDSAB_CMD_STRIDE, INDSAB_CMD_ARENA_OFFSET, INDSAB_CMD_BAR_COUNT,
   INDSAB_CMD_FLAG_MASK, INDSAB_CMD_STYLE,
   INDSAB_ARENA_OFF,
+  INDSAB_OVERLAY_STD430_OFF, INDSAB_OVERLAY_STD430_WORDS, INDSAB_OVERLAY_REV_OFF,
 } from './shared_protocol.js';
-
-const WORKER_BUILD_VERSION = '20260306c';
 
 // DPR is set from the main thread's init message (self.devicePixelRatio is
 // unreliable in Workers — may be undefined or 1 depending on browser version).
@@ -135,6 +134,9 @@ let _smaCachedRevision = -1;
 /** @type {DataView|null} */          let _indSabHdr = null;  // cached DataView on indSab header
 /** @type {Float32Array|null} */      let _indArenaView = null;  // cached max-capacity arena view
 /** @type {number} */                 let _indArenaViewLen = 0;  // current cached arena capacity
+/** @type {number} */                 let workerSlotId = 0;
+/** @type {number} */                 let _overlayRevSeen = -1;
+const _overlaySummaryWords = new Uint32Array(INDSAB_OVERLAY_STD430_WORDS);
 
 /**
  * Read SMA values at bar index `idx` from the EP arena in indSab.
@@ -181,6 +183,17 @@ function _readSmaPop(idx) {
   _popupData.sma100 = (idx < _smaBarCount[2] && _smaArenaOff[2] + idx < arenaLen) ? _indArenaView[_smaArenaOff[2] + idx] : NaN;
 }
 
+function _readOverlaySummary() {
+  if (!_indSabHdr) return _overlaySummaryWords;
+  const rev = _indSabHdr.getUint32(INDSAB_OVERLAY_REV_OFF, true);
+  if (rev === _overlayRevSeen) return _overlaySummaryWords;
+  _overlayRevSeen = rev;
+  for (let i = 0; i < INDSAB_OVERLAY_STD430_WORDS; i++) {
+    _overlaySummaryWords[i] = _indSabHdr.getUint32(INDSAB_OVERLAY_STD430_OFF + i * 4, true);
+  }
+  return _overlaySummaryWords;
+}
+
 self.onmessage = async (evt) => {
   if (evt.data.type === 'update_sma_periods') {
       smaPeriods.sma1 = evt.data.sma1;
@@ -203,18 +216,24 @@ self.onmessage = async (evt) => {
     return;
   }
   if (evt.data.type !== 'init') return;
-  const { gpuCanvas: gc, hudCanvas: hc, ctrl: ctrlBuf,
-          frameCtrl: frcBuf, frameBuf: fsBuf, indSab } = evt.data;
+  const descriptor = evt.data.descriptor ?? {
+    slotId: 0,
+    ctrl: evt.data.ctrl,
+    frameCtrl: evt.data.frameCtrl,
+    frameBuf: evt.data.frameBuf,
+    indSab: evt.data.indSab,
+  };
+  const { gpuCanvas: gc, hudCanvas: hc } = evt.data;
+  workerSlotId = ((descriptor.slotId | 0) >>> 0);
+  const ctrlBuf = descriptor.ctrl;
+  const frcBuf = descriptor.frameCtrl;
+  const fsBuf = descriptor.frameBuf;
+  const indSab = descriptor.indSab;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
     DPR = Math.round(evt.data.dpr);
   }
-  console.log(
-    '[render_worker] init |',
-    `dpr=${DPR}`,
-    `worker=${WORKER_BUILD_VERSION}`,
-    `host=${evt.data.buildVersion ?? 'n/a'}`,
-  );
+  console.log('[render_worker] DPR:', DPR, 'slot:', workerSlotId);
   gpuCanvas  = gc; hudCanvas = hc;
   ctrl       = new Int32Array(ctrlBuf);
   frameCtrl  = new Int32Array(frcBuf);
@@ -276,7 +295,7 @@ function renderLoop() {
     const physH   = fdbHdr.getFloat32(FBUF_CANVAS_H, true);
     const flags   = fdbHdr.getUint32 (FBUF_FLAGS,    true);
 
-    const ci = 0;
+    const ci = workerSlotId;
     const dirtyBits = Atomics.load(ctrl, ci * STRIDE + DIRTY);
     const gpuDirty  = (dirtyBits & GPU_DIRTY) !== 0;
     const hudDirty  = (dirtyBits & HUD_DIRTY)  !== 0;
@@ -288,6 +307,7 @@ function renderLoop() {
 
     // Resize if needed
     if (gpuCanvas.width !== physW || gpuCanvas.height !== physH) {
+      // @zero_alloc_allow: setSize may reconfigure GPU resources only on resize, not per steady-state frame.
       gpuRenderer.setSize(gpuCanvas, physW, physH);
       hudCanvas.width  = physW;
       hudCanvas.height = physH;
@@ -301,7 +321,13 @@ function renderLoop() {
     if (gpuDirty || isNaN(_r64[R_CACHED_PMIN])) {
       const t0_gpu = performance.now();
       try {
-        const [pMin, pMax] = gpuRenderer.drawGpu(frameBuf, fdbHdr, viewLen);
+        const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
+        const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
+        // @zero_alloc_allow: drawGpu internals are audited separately; keep renderFrame gate focused on worker-frame allocations.
+        const [pMin, pMax] = gpuRenderer.drawGpu(frameBuf, fdbHdr, viewLen, {
+          panOffsetPx,
+          extraLeftBars: Math.max(0, fdbHdr.getUint32(FBUF_START_BAR, true) - frameStartBar),
+        });
         _r64[R_CACHED_PMIN] = pMin;
         _r64[R_CACHED_PMAX] = pMax;
         if (firstFrame) {
@@ -323,6 +349,9 @@ function renderLoop() {
         const ptrX  = i32ToF32(Atomics.load(ctrl, ci * STRIDE + POINTER_X));
         const ptrY  = i32ToF32(Atomics.load(ctrl, ci * STRIDE + POINTER_Y));
         const visBc = Atomics.load(ctrl, ci * STRIDE + 3);
+        const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
+        const logicalStartBar = fdbHdr.getUint32(FBUF_START_BAR, true);
+        const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
 
         hud.setTransform(DPR, 0, 0, DPR, 0, 0);
         hud.clearRect(0, 0, plotW, plotH);
@@ -335,7 +364,8 @@ function renderLoop() {
           if (ptrX >= 0 && ptrY >= 0 && ptrX < plotW && ptrY < plotH) {
             const chartAreaW = plotW - 60;
             const barStep = chartAreaW / Math.max(1, visBc);
-            const lIdx = Math.max(0, Math.min(visBc - 1, Math.floor(ptrX / barStep)));
+            const offsetSlots = (logicalStartBar - frameStartBar) + (panOffsetPx / Math.max(1e-6, barStep));
+            const lIdx = Math.max(0, Math.min(viewLen - 1, Math.floor(ptrX / Math.max(1e-6, barStep) + offsetSlots)));
             let dateLabel = '';
             let popupData = null;
             if (viewLen > 0 && lIdx < viewLen) {
@@ -353,7 +383,7 @@ function renderLoop() {
             }
             drawCrosshair(hud, plotW, plotH, ptrX, ptrY, pMin, pMax, layout, dateLabel, popupData, flags);
           }
-          drawLegend(hud, flags);
+          drawLegend(hud, flags, _readOverlaySummary());
           if (layout) drawPaneBorders(hud, plotW, layout);
         }
         if (hudHasCommit) hud.commit();
@@ -436,6 +466,12 @@ function drawPriceAxis(ctx, w, h, yMin, yMax, layout) {
 function drawDateAxis(ctx, w, h, viewLen) {
   if (viewLen === 0) return;
   const plotW = w - 60;
+  const logicalStartBar = fdbHdr.getUint32(FBUF_START_BAR, true);
+  const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
+  const visBars = Math.max(1, fdbHdr.getUint32(FBUF_VIS_BARS, true));
+  const panOffsetPx = i32ToF32(Atomics.load(ctrl, workerSlotId * STRIDE + SUBPIXEL_PAN_X));
+  const slotW = plotW / Math.max(1, visBars);
+  const offsetSlots = (logicalStartBar - frameStartBar) + (panOffsetPx / Math.max(1e-6, slotW));
   // Use pre-allocated _fbTime view (FRAME_MAX_BARS capacity) — zero alloc
   const times = _fbTime;
   ctx.save();
@@ -446,8 +482,10 @@ function drawDateAxis(ctx, w, h, viewLen) {
   const TICKS = 6;
   for (let i = 0; i < TICKS; i++) {
     const frac = i / (TICKS - 1);
-    const idx  = Math.round(frac * (viewLen - 1));
-    ctx.fillText(isoDateStr(times[idx]), frac * plotW, h - 2);
+    const localSlot = frac * Math.max(0, visBars - 1);
+    const idx = Math.max(0, Math.min(viewLen - 1, Math.round(localSlot + offsetSlots)));
+    const x = ((localSlot + 0.5) - (panOffsetPx / Math.max(1e-6, slotW))) * slotW;
+    ctx.fillText(isoDateStr(times[idx]), x, h - 2);
   }
   ctx.restore();
 }
@@ -488,6 +526,7 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
     let priceStr;
     if (_priceLabelCache.last !== price) {
       _priceLabelCache.last = price;
+      // @zero_alloc_allow: Cached label is rebuilt only when price changes.
       _priceLabelCache.str = price.toFixed(2);
     }
     priceStr = _priceLabelCache.str;
@@ -521,15 +560,21 @@ function drawCrosshair(ctx, w, h, px, py, yMin, yMax, layout, dateLabel = '', po
         _popupCache.lastBarTime = barTime;
         _popupCache.lastFlags = flags;
         _popupCache.lines[0] = 'Date: ' + dateLabel;
+        // @zero_alloc_allow: Popup strings are rebuilt only on bar/flag boundary changes.
         _popupCache.lines[1] = 'O: ' + popupData.open.toFixed(2) + '  H: ' + popupData.high.toFixed(2);
+        // @zero_alloc_allow: Popup strings are rebuilt only on bar/flag boundary changes.
         _popupCache.lines[2] = 'L: ' + popupData.low.toFixed(2) + '  C: ' + popupData.close.toFixed(2);
+        // @zero_alloc_allow: formatVolume allocates strings intentionally for display text; cached via _popupCache.
         _popupCache.lines[3] = 'Vol: ' + formatVolume(popupData.vol);
         const hasSma20 = (flags & 1) && !Number.isNaN(popupData.sma20) && popupData.sma20 > 0;
         const hasSma50 = (flags & 2) && !Number.isNaN(popupData.sma50) && popupData.sma50 > 0;
         const hasSma100 = (flags & 4) && !Number.isNaN(popupData.sma100) && popupData.sma100 > 0;
         _popupCache.lineCount = 4 + (hasSma20 ? 1 : 0) + (hasSma50 ? 1 : 0) + (hasSma100 ? 1 : 0);
+        // @zero_alloc_allow: Indicator text labels are rebuilt only when popup cache invalidates.
         _popupCache.lines[4] = hasSma20 ? (smaPrefix1 + ' ' + popupData.sma20.toFixed(2)) : '';
+        // @zero_alloc_allow: Indicator text labels are rebuilt only when popup cache invalidates.
         _popupCache.lines[5] = hasSma50 ? (smaPrefix2 + ' ' + popupData.sma50.toFixed(2)) : '';
+        // @zero_alloc_allow: Indicator text labels are rebuilt only when popup cache invalidates.
         _popupCache.lines[6] = hasSma100 ? (smaPrefix3 + ' ' + popupData.sma100.toFixed(2)) : '';
         // measure widths once and cache
         ctx.font = '11px monospace';
@@ -619,7 +664,7 @@ function drawPaneBorders(ctx, plotW, layout) {
   ctx.restore();
 }
 
-function drawLegend(ctx, flags) {
+function drawLegend(ctx, flags, overlaySummary) {
   ctx.save();
   ctx.font = 'bold 12px sans-serif'; ctx.textBaseline = 'top';
   ctx.fillStyle = '#222'; ctx.fillText('MSFT', 8, 8);
@@ -634,6 +679,19 @@ function drawLegend(ctx, flags) {
     ctx.font = '10px monospace'; ctx.fillStyle = 'rgba(0,0,0,0.45)';
     // @zero_alloc_allow: String formatting for debugging text overlay
     ctx.fillText(`GPU ~${_r64[R_LAST_GPU_MS].toFixed(1)}ms`, x, 9);
+    x += 78;
+  }
+  if (overlaySummary && overlaySummary[0] > 0) {
+    const total = overlaySummary[0] >>> 0;
+    const marker = overlaySummary[1] >>> 0;
+    const hline = overlaySummary[2] >>> 0;
+    const zone = overlaySummary[3] >>> 0;
+    const text = overlaySummary[4] >>> 0;
+    const event = overlaySummary[5] >>> 0;
+    ctx.font = '10px monospace';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    // @zero_alloc_allow: Compact HUD text is generated once per frame and bounded.
+    ctx.fillText(`ANN ${total} M${marker} H${hline} Z${zone} T${text} E${event}`, x, 9);
   }
   ctx.restore();
 }

@@ -32,23 +32,23 @@ import {
   INDSAB_CMD_FLAG_MASK, INDSAB_CMD_VALUE_MIN, INDSAB_CMD_VALUE_MAX,
   INDSAB_ARENA_OFF,
 } from './shared_protocol.js';
+import {
+  CANDLES_AUTO_RENDER_WGSL,
+  INDICATOR_BAND_WGSL,
+  INDICATOR_HISTOGRAM_WGSL,
+  INDICATOR_RENDER_WGSL,
+  LINE_THICK_WGSL,
+  MINMAX_COMPUTE_WGSL,
+  SMA_COMPUTE_WGSL,
+  VOLUME_PROFILE_WGSL,
+  VP_RENDER_WGSL,
+} from './generated_shaders.js';
 
 // ── Render style constants (must match execution_plan.rs RenderStyle) ─────
 const STYLE_LINE       = 0;
 const STYLE_THICK_LINE = 1;
 const STYLE_HISTOGRAM  = 2;
 const STYLE_BAND       = 3;
-
-// ── WGSL shader source paths (relative to this module's URL) ─────────────
-const SHADERS_BASE = '../shaders/';
-
-/** @param {string} name */
-async function fetchShader(name) {
-  const url = new URL(SHADERS_BASE + name, import.meta.url).href;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`Failed to fetch shader ${name}: ${resp.status}`);
-  return resp.text();
-}
 
 // ── GpuRenderer ────────────────────────────────────────────────────────────
 
@@ -118,6 +118,49 @@ export class GpuRenderer {
   _indUniBuf = new ArrayBuffer(80);   // EP indicator uniform (80B = max of all shader types)
   _indUniBufDv = new DataView(this._indUniBuf);  // DataView on _indUniBuf
   _cachedLayout = { main: { y: 0, h: 0 }, sub1: { y: 0, h: 0 }, sub2: { y: 0, h: 0 }, gap: 0 };
+  _defaultPaneConfig = { gap: 2, main: 7.0, sub1: 1.5, sub2: 1.5, marginBot: 8 };
+  _priceRangeOut = [0, 1];
+  _submitCmds = [null];
+  _vpZeroBuf = new Uint32Array(128);
+
+  _compBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+    { binding: 2, resource: { buffer: null } },
+  ];
+  _compBgDesc = { layout: null, entries: this._compBgEntries };
+  _candleBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+    { binding: 2, resource: { buffer: null } },
+  ];
+  _candleBgDesc = { layout: null, entries: this._candleBgEntries };
+  _lineBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+  ];
+  _lineBgDesc = { layout: null, entries: this._lineBgEntries };
+  _vpRenderBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+  ];
+  _vpRenderBgDesc = { layout: null, entries: this._vpRenderBgEntries };
+  _vpComputeBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+    { binding: 2, resource: { buffer: null } },
+  ];
+  _vpComputeBgDesc = { layout: null, entries: this._vpComputeBgEntries };
+  _indicatorBg0Entries = [{ binding: 0, resource: { buffer: null, size: 0 } }];
+  _indicatorBg0Desc = { layout: null, entries: this._indicatorBg0Entries };
+  _indicatorBg1Entries = [{ binding: 0, resource: { buffer: null } }];
+  _indicatorBg1Desc = { layout: null, entries: this._indicatorBg1Entries };
+
+  _clearColor = { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+  _clearPassColorAttachments = [{ view: null, loadOp: 'clear', storeOp: 'store', clearValue: this._clearColor }];
+  _clearPassDesc = { colorAttachments: this._clearPassColorAttachments };
+  _loadPassColorAttachments = [{ view: null, loadOp: 'load', storeOp: 'store' }];
+  _loadPassDesc = { colorAttachments: this._loadPassColorAttachments };
 
   // ── Cached arena view for indSab GPU upload ──
   /** @type {Float32Array|null} */ _indArenaView = null;
@@ -129,6 +172,9 @@ export class GpuRenderer {
   /** @type {Float32Array|null} */ _fbLow   = null;
   /** @type {Float32Array|null} */ _fbClose = null;
   /** @type {Float32Array|null} */ _fbVol   = null;
+  /** @type {Float32Array|null} */ _fbSma20 = null;
+  /** @type {Float32Array|null} */ _fbSma50 = null;
+  /** @type {Float32Array|null} */ _fbSma100 = null;
 
   // Timestamp query resources
   /** @type {GPUQuerySet|null} */ timestampQuerySet = null;
@@ -163,19 +209,16 @@ export class GpuRenderer {
     // Configure canvas (will be reconfigured on resize)
     this._configureContext(gpuCanvas.width, gpuCanvas.height);
 
-    // Fetch WGSL shaders (once at init, cached as strings)
-    [this._minmaxWgsl, this._candleWgsl, this._lineWgsl, this._smaWgsl, this._vpWgsl, this._vpRenderWgsl,
-     this._indLineWgsl, this._indHistWgsl, this._indBandWgsl] = await Promise.all([
-      fetchShader('minmax_compute.wgsl'),
-      fetchShader('candles_auto_render.wgsl'),
-      fetchShader('line_thick.wgsl'),
-      fetchShader('sma_compute.wgsl'),
-      fetchShader('volume_profile.wgsl'),
-      fetchShader('vp_render.wgsl'),
-      fetchShader('indicator_render.wgsl'),
-      fetchShader('indicator_histogram.wgsl'),
-      fetchShader('indicator_band.wgsl'),
-    ]);
+    // WGSL is minified and embedded at build time so worker startup does not depend on runtime fetch.
+    this._minmaxWgsl = MINMAX_COMPUTE_WGSL;
+    this._candleWgsl = CANDLES_AUTO_RENDER_WGSL;
+    this._lineWgsl = LINE_THICK_WGSL;
+    this._smaWgsl = SMA_COMPUTE_WGSL;
+    this._vpWgsl = VOLUME_PROFILE_WGSL;
+    this._vpRenderWgsl = VP_RENDER_WGSL;
+    this._indLineWgsl = INDICATOR_RENDER_WGSL;
+    this._indHistWgsl = INDICATOR_HISTOGRAM_WGSL;
+    this._indBandWgsl = INDICATOR_BAND_WGSL;
 
     // Create pipelines eagerly so first frame has no jank from lazy init
     this.minmaxPipeline  = this._makeComputePipeline(this._minmaxWgsl);
@@ -185,6 +228,37 @@ export class GpuRenderer {
     this.indLinePipeline = this._makeRenderPipeline(this._indLineWgsl);
     this.indHistPipeline = this._makeRenderPipeline(this._indHistWgsl);
     this.indBandPipeline = this._makeRenderPipeline(this._indBandWgsl);
+    this.vpPipeline      = this._makeComputePipeline(this._vpWgsl);
+    this.vpRenderPipeline = this._makeRenderPipeline(this._vpRenderWgsl);
+
+    this.mmBuf = this.device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.computeParamBuf = this.device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.candleUniBuf = this.device.createBuffer({
+      size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.lineUniBuf = this.device.createBuffer({
+      size: 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.vpParamsBuf = this.device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.vpRenderUniforms = this.device.createBuffer({
+      size: 48,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.vpBuffer = this.device.createBuffer({
+      size: this._vpZeroBuf.length * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
 
     // Device lost handler
     this.device.lost.then(info => {
@@ -299,8 +373,13 @@ export class GpuRenderer {
    * @param {number}    viewLen  — actual bar count from FDB
    * @returns {[number, number]}  [paddedMin, paddedMax]
    */
-  drawGpu(frameBuf, fdbHdr, viewLen) {
-    if (viewLen === 0) return [0, 1];
+  /** @zero_alloc */
+  drawGpu(frameBuf, fdbHdr, viewLen, viewportShift = { panOffsetPx: 0, extraLeftBars: 0 }) {
+    if (viewLen === 0) {
+      this._priceRangeOut[0] = 0;
+      this._priceRangeOut[1] = 1;
+      return this._priceRangeOut;
+    }
     const { device } = this;
     const queue = device.queue;
 
@@ -312,6 +391,8 @@ export class GpuRenderer {
     const pmin     = fdbHdr.getFloat32(FBUF_PRICE_MIN, true);
     const pmax     = fdbHdr.getFloat32(FBUF_PRICE_MAX, true);
     const flags    = fdbHdr.getUint32 (FBUF_FLAGS,     true);
+    const slotW    = plotW / Math.max(1, visBc);
+    const offsetSlots = viewportShift.extraLeftBars + (viewportShift.panOffsetPx / Math.max(1e-6, slotW));
 
     const DPR = this.dpr;
 
@@ -324,11 +405,14 @@ export class GpuRenderer {
     const pad     = Math.max(range * 0.05, (6 / Math.max(mainH, 1)) * range);
     const paddedMin = pmin - pad;
     const paddedMax = pmax + pad;
+    this._priceRangeOut[0] = paddedMin;
+    this._priceRangeOut[1] = paddedMax;
 
     // ── 1. Ensure storage buffer: [open|high|low|close|vol] × viewLen f32 ──────
     const storageNeeded = viewLen * 5 * 4;  // 5 channels × 4 bytes
     if (!this.storageBuf || this.storageBufSize < storageNeeded) {
       this.storageBuf?.destroy();
+      // @zero_alloc_allow: Storage buffer grows only when visible bar capacity increases beyond the previous maximum.
       this.storageBuf = device.createBuffer({
         size:  storageNeeded,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
@@ -339,20 +423,11 @@ export class GpuRenderer {
     // Upload SoA channels from frameBuf (SAB) to storage buffer.
     // Uses pre-allocated max-capacity views (created once in setFrameBufViews).
     const stride = viewLen * 4;
-    if (this._fbOpen) {
-      queue.writeBuffer(this.storageBuf,          0, this._fbOpen,  0, viewLen);
-      queue.writeBuffer(this.storageBuf,     stride, this._fbHigh,  0, viewLen);
-      queue.writeBuffer(this.storageBuf, stride * 2, this._fbLow,   0, viewLen);
-      queue.writeBuffer(this.storageBuf, stride * 3, this._fbClose, 0, viewLen);
-      queue.writeBuffer(this.storageBuf, stride * 4, this._fbVol,   0, viewLen);
-    } else {
-      // Fallback: create views on the fly (first frame before setFrameBufViews)
-      queue.writeBuffer(this.storageBuf,          0, new Float32Array(frameBuf, FBUF_OPEN_OFF,  viewLen));
-      queue.writeBuffer(this.storageBuf,     stride, new Float32Array(frameBuf, FBUF_HIGH_OFF,  viewLen));
-      queue.writeBuffer(this.storageBuf, stride * 2, new Float32Array(frameBuf, FBUF_LOW_OFF,   viewLen));
-      queue.writeBuffer(this.storageBuf, stride * 3, new Float32Array(frameBuf, FBUF_CLOSE_OFF, viewLen));
-      queue.writeBuffer(this.storageBuf, stride * 4, new Float32Array(frameBuf, FBUF_VOL_OFF,   viewLen));
-    }
+    queue.writeBuffer(this.storageBuf,          0, this._fbOpen,  0, viewLen);
+    queue.writeBuffer(this.storageBuf,     stride, this._fbHigh,  0, viewLen);
+    queue.writeBuffer(this.storageBuf, stride * 2, this._fbLow,   0, viewLen);
+    queue.writeBuffer(this.storageBuf, stride * 3, this._fbClose, 0, viewLen);
+    queue.writeBuffer(this.storageBuf, stride * 4, this._fbVol,   0, viewLen);
 
     // Upload CPU-precomputed SMA values from frameBuf (SAB) into GPU buffers.
     // Skipped when the EP pipeline is active (indSab set) — the arena carries
@@ -366,44 +441,25 @@ export class GpuRenderer {
     }
 
     // ── 2. Minmax buffer (8B): [atomicMax(high_bits), atomicMin(low_bits)] ──
-    if (!this.mmBuf) {
-      this.mmBuf = device.createBuffer({
-        size:  16,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-    }
     // Reset: max_init=0.0 (0x00000000), min_init=f32::MAX (0x7F7FFFFF)
     queue.writeBuffer(this.mmBuf, 0, this._mmInit);
 
     // ── 3. Compute params buffer (16B uniform) ────────────────────────────
-    if (!this.computeParamBuf) {
-      // Use 32 bytes to satisfy minBindingSize requirements on some drivers
-      this.computeParamBuf = device.createBuffer({
-        size:  32,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-    }
     // { total_len, start_index=0, visible_count, _pad }
     this._cpData[0] = viewLen; this._cpData[1] = 0; this._cpData[2] = viewLen; this._cpData[3] = 0;
     queue.writeBuffer(this.computeParamBuf, 0, this._cpData);
 
     // ── 4. Candle uniform buffer (96B) ─────────────────────────────────────
-    if (!this.candleUniBuf) {
-      this.candleUniBuf = device.createBuffer({
-        size:  96,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-    }
     {
       const v = this._candleUbufDv;
       v.setFloat32( 0, plotW,   true);  // pw
       v.setFloat32( 4, candleW, true);  // cw
       v.setUint32 ( 8, viewLen, true);  // total_len
       v.setUint32 (12, 0,       true);  // start_index
-      v.setUint32 (16, viewLen, true);  // visible_count
+      v.setUint32 (16, visBc,   true);  // visible_count
       v.setFloat32(20, mainH,   true);  // ph — main pane height (not full canvas)
       v.setFloat32(24, DPR,     true);  // border_width (1.0 CSS px)
-      v.setUint32 (28, visBc,   true);  // slots (replace _pad)
+      v.setFloat32(28, offsetSlots, true);  // offset_slots
       // bull_color: #00AA00 alpha 1
       v.setFloat32(32, 0.00, true); v.setFloat32(36, 0.67, true);
       v.setFloat32(40, 0.00, true); v.setFloat32(44, 1.00, true);
@@ -425,14 +481,11 @@ export class GpuRenderer {
     // Compute pass: minmax
     {
       const compBGL = this.minmaxPipeline.getBindGroupLayout(0);
-      const compBG  = device.createBindGroup({
-        layout: compBGL,
-        entries: [
-          { binding: 0, resource: { buffer: this.storageBuf } },
-          { binding: 1, resource: { buffer: this.mmBuf } },
-          { binding: 2, resource: { buffer: this.computeParamBuf } },
-        ],
-      });
+      this._compBgDesc.layout = compBGL;
+      this._compBgEntries[0].resource.buffer = this.storageBuf;
+      this._compBgEntries[1].resource.buffer = this.mmBuf;
+      this._compBgEntries[2].resource.buffer = this.computeParamBuf;
+      const compBG = device.createBindGroup(this._compBgDesc);
       const compPass = encoder.beginComputePass();
       compPass.setPipeline(this.minmaxPipeline);
       compPass.setBindGroup(0, compBG);
@@ -443,23 +496,14 @@ export class GpuRenderer {
     // Render pass: candles (clears to background)
     {
       const candleBGL = this.candlePipeline.getBindGroupLayout(0);
-      const candleBG  = device.createBindGroup({
-        layout: candleBGL,
-        entries: [
-          { binding: 0, resource: { buffer: this.candleUniBuf } },
-          { binding: 1, resource: { buffer: this.storageBuf } },
-          { binding: 2, resource: { buffer: this.mmBuf } },
-        ],
-      });
+      this._candleBgDesc.layout = candleBGL;
+      this._candleBgEntries[0].resource.buffer = this.candleUniBuf;
+      this._candleBgEntries[1].resource.buffer = this.storageBuf;
+      this._candleBgEntries[2].resource.buffer = this.mmBuf;
+      const candleBG = device.createBindGroup(this._candleBgDesc);
       const swapView = this.context.getCurrentTexture().createView();
-      const renderPass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view:       swapView,
-          loadOp:     'clear',
-          storeOp:    'store',
-          clearValue: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
-        }],
-      });
+      this._clearPassColorAttachments[0].view = swapView;
+      const renderPass = encoder.beginRenderPass(this._clearPassDesc);
       // Restrict candle drawing to main pane (sub-pane regions stay cleared to white)
       if (mainH < plotH) renderPass.setViewport(0, 0, plotW, mainH, 0, 1);
       renderPass.setPipeline(this.candlePipeline);
@@ -468,12 +512,13 @@ export class GpuRenderer {
       renderPass.end();
     }
 
-    queue.submit([encoder.finish()]);
+    this._submitCmds[0] = encoder.finish();
+    queue.submit(this._submitCmds);
 
     // ── 6. Indicator overlays ────────────────────────────────────────────────
     if (this.indSab) {
       // EP pipeline: arena-driven draw loop (replaces legacy per-SMA calls).
-      this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, visBc);
+      this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, visBc, offsetSlots);
     } else {
       // Legacy SMA overlay — used when indSab is not set (no EP integration).
       // nanStart heuristic: bars before (period-1) have incomplete history.
@@ -489,7 +534,7 @@ export class GpuRenderer {
       this._drawVolumeProfileHeatmap(plotW, mainH, numBins, plotW - 120, 120, 0.4, 0.4, 0.9, 0.3);
     }
 
-    return [paddedMin, paddedMax];
+    return this._priceRangeOut;
   }
 
   /**
@@ -507,13 +552,6 @@ export class GpuRenderer {
     const entry = this.smaLineBufs.get(smaByteOff);
     if (!entry) return;  // _uploadSmaToBuf wasn't called — skip
 
-    // Lazy allocate line uniform buffer (64B, shared across all lines)
-    if (!this.lineUniBuf) {
-      this.lineUniBuf = device.createBuffer({
-        size:  64,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-    }
     // Pack 64B line uniforms (reuse pre-allocated _lineUbuf)
     {
       const v = this._lineUbufDv;
@@ -535,31 +573,24 @@ export class GpuRenderer {
     }
 
     const lineBGL = this.linePipeline.getBindGroupLayout(0);
-    const lineBG  = device.createBindGroup({
-      layout: lineBGL,
-      entries: [
-        { binding: 0, resource: { buffer: this.lineUniBuf } },
-        { binding: 1, resource: { buffer: entry.buf } },
-      ],
-    });
+    this._lineBgDesc.layout = lineBGL;
+    this._lineBgEntries[0].resource.buffer = this.lineUniBuf;
+    this._lineBgEntries[1].resource.buffer = entry.buf;
+    const lineBG = device.createBindGroup(this._lineBgDesc);
 
     // Current swapchain texture (LoadOp::load — overlay on top of candles)
     const swapView = this.context.getCurrentTexture().createView();
     const encoder  = device.createCommandEncoder();
-    const pass     = encoder.beginRenderPass({
-      colorAttachments: [{
-        view:    swapView,
-        loadOp:  'load',
-        storeOp: 'store',
-      }],
-    });
+    this._loadPassColorAttachments[0].view = swapView;
+    const pass = encoder.beginRenderPass(this._loadPassDesc);
     // Restrict legacy SMA lines to main pane viewport
     pass.setViewport(0, 0, plotW, plotH, 0, 1);
     pass.setPipeline(this.linePipeline);
     pass.setBindGroup(0, lineBG);
     pass.draw((viewLen - 1) * 6);  // (N-1) segments × 6 verts each
     pass.end();
-    queue.submit([encoder.finish()]);
+    this._submitCmds[0] = encoder.finish();
+    queue.submit(this._submitCmds);
   }
 
   /**
@@ -571,18 +602,6 @@ export class GpuRenderer {
     if (!this.vpBuffer || !this.device) return;
     const { device } = this;
     const queue = device.queue;
-
-    if (!this.vpRenderPipeline) {
-      if (!this._vpRenderWgsl) return; // not loaded yet
-      this.vpRenderPipeline = this._makeRenderPipeline(this._vpRenderWgsl);
-    }
-
-    if (!this.vpRenderUniforms) {
-      this.vpRenderUniforms = device.createBuffer({
-        size: 48,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-    }
 
     const ubuf = this._vpRenderUbuf;
     const dv = this._vpRenderDv;
@@ -600,30 +619,23 @@ export class GpuRenderer {
     queue.writeBuffer(this.vpRenderUniforms, 0, ubuf);
 
     const bgl = this.vpRenderPipeline.getBindGroupLayout(0);
-    const bg = device.createBindGroup({
-      layout: bgl,
-      entries: [
-        { binding: 0, resource: { buffer: this.vpRenderUniforms } },
-        { binding: 1, resource: { buffer: this.vpBuffer } }
-      ]
-    });
+    this._vpRenderBgDesc.layout = bgl;
+    this._vpRenderBgEntries[0].resource.buffer = this.vpRenderUniforms;
+    this._vpRenderBgEntries[1].resource.buffer = this.vpBuffer;
+    const bg = device.createBindGroup(this._vpRenderBgDesc);
 
     const swapView = this.context.getCurrentTexture().createView();
     const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{
-        view: swapView,
-        loadOp: 'load',
-        storeOp: 'store',
-      }]
-    });
+    this._loadPassColorAttachments[0].view = swapView;
+    const pass = encoder.beginRenderPass(this._loadPassDesc);
     // Restrict to main pane viewport (plotH may be mainH when sub-panes are active)
     pass.setViewport(0, 0, plotW, plotH, 0, 1);
     pass.setPipeline(this.vpRenderPipeline);
     pass.setBindGroup(0, bg);
     pass.draw(6, numBins);
     pass.end();
-    queue.submit([encoder.finish()]);
+    this._submitCmds[0] = encoder.finish();
+    queue.submit(this._submitCmds);
   }
 
   // ── EP indicator pipeline ─────────────────────────────────────────────────
@@ -655,6 +667,9 @@ export class GpuRenderer {
     this._fbLow   = new Float32Array(fbuf, FBUF_LOW_OFF,   FRAME_MAX_BARS);
     this._fbClose = new Float32Array(fbuf, FBUF_CLOSE_OFF, FRAME_MAX_BARS);
     this._fbVol   = new Float32Array(fbuf, FBUF_VOL_OFF,   FRAME_MAX_BARS);
+    this._fbSma20  = new Float32Array(fbuf, FBUF_SMA20_OFF, FRAME_MAX_BARS);
+    this._fbSma50  = new Float32Array(fbuf, FBUF_SMA50_OFF, FRAME_MAX_BARS);
+    this._fbSma100 = new Float32Array(fbuf, FBUF_SMA100_OFF, FRAME_MAX_BARS);
   }
 
   /**
@@ -699,6 +714,7 @@ export class GpuRenderer {
     this.arenaGpuBuf?.destroy();
     // Allocate exactly `needed` (no doubling — arena size is stable between recompiles)
     const size = Math.max(needed, 256);  // minimum 256B to avoid 0-size buffer
+    // @zero_alloc_allow: Arena GPU buffer is recreated only when plan arena capacity changes after recompilation.
     this.arenaGpuBuf = this.device.createBuffer({
       size, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -728,6 +744,7 @@ export class GpuRenderer {
    * @param {number} flags  indicator visibility flags
    * @returns {{ main: {y:number,h:number}, sub1: {y:number,h:number}|null, sub2: {y:number,h:number}|null }}
    */
+  /** @zero_alloc */
   _computePaneLayout(plotH, flags) {
     let hasSub1 = false, hasSub2 = false;
     if (this.indSab) {
@@ -746,7 +763,7 @@ export class GpuRenderer {
       }
     }
 
-    const config = this.paneConfig || { gap: 2, main: 7.0, sub1: 1.5, sub2: 1.5 };
+    const config = this.paneConfig || this._defaultPaneConfig;
     
     // Gap and bottom margin are logical CSS pixels conceptually, 
     // but plotH is in physical pixels. We apply DPR scaling here.
@@ -818,7 +835,7 @@ export class GpuRenderer {
    * @param {number} priceMax  padded price max
    * @param {{ main: {y:number,h:number}, sub1: {y:number,h:number}|null, sub2: {y:number,h:number}|null }} paneLayout
    */
-  _drawIndicatorCmds(plotW, candleW, priceMin, priceMax, paneLayout, flags = 0xffffffff, visBc) {
+  _drawIndicatorCmds(plotW, candleW, priceMin, priceMax, paneLayout, flags = 0xffffffff, visBc, offsetSlots = 0) {
     const hdr      = this._indHdrView;
     const arenaLen = hdr.getUint32(INDSAB_ARENA_LEN, true);
     const cmdCount = hdr.getUint32(INDSAB_CMD_COUNT, true);
@@ -838,6 +855,7 @@ export class GpuRenderer {
     // Re-create cached arena view only when length grows (rare: plan recompile).
     this._ensureArenaGpuBuf(arenaLen);
     if (!this._indArenaView || arenaLen > this._indArenaViewCap) {
+      // @zero_alloc_allow: Arena SAB view is recreated only when plan output grows after recompile.
       this._indArenaView = new Float32Array(this.indSab, INDSAB_ARENA_OFF, arenaLen);
       this._indArenaViewCap = arenaLen;
     }
@@ -890,19 +908,19 @@ export class GpuRenderer {
         const bars = barCount - warmup;
         if (bars < 1) continue;
         this._packHistogramUni(dv, plotW, paneH, candleW, yMin, yMax,
-          arenaOff, barCount, warmup, cr, cg, cb, ca, visBc);
+          arenaOff, barCount, warmup, cr, cg, cb, ca, visBc, offsetSlots);
         pipeline = this.indHistPipeline; uniSize = 80; drawCount = bars * 6;
       } else if (style === STYLE_BAND) {
         const segs = barCount - warmup - 1;
         if (segs < 1) continue;
         this._packBandUni(dv, plotW, paneH, candleW, yMin, yMax,
-          arenaOff, bandAltOff, barCount, warmup, cr, cg, cb, ca, visBc);
+          arenaOff, bandAltOff, barCount, warmup, cr, cg, cb, ca, visBc, offsetSlots);
         pipeline = this.indBandPipeline; uniSize = 64; drawCount = segs * 6;
       } else {
         const seg = barCount - warmup - 1;
         if (seg < 1) continue;
         this._packThickLineUni(dv, plotW, paneH, candleW, yMin, yMax,
-          arenaOff, barCount, warmup, lineW, cr, cg, cb, ca, visBc);
+          arenaOff, barCount, warmup, lineW, cr, cg, cb, ca, visBc, offsetSlots);
         pipeline = this.indLinePipeline; uniSize = 64; drawCount = seg * 6;
       }
 
@@ -925,20 +943,20 @@ export class GpuRenderer {
     // have their own GPUBindGroupLayout.  The creation cost is negligible.
     const swapView = this.context.getCurrentTexture().createView();
     const encoder  = device.createCommandEncoder();
-    const pass     = encoder.beginRenderPass({
-      colorAttachments: [{ view: swapView, loadOp: 'load', storeOp: 'store' }],
-    });
+    this._loadPassColorAttachments[0].view = swapView;
+    const pass = encoder.beginRenderPass(this._loadPassDesc);
     for (let di = 0; di < poolIdx; di++) {
       const { pipeline, uniBufIdx, uniSize, drawCount, vpY, vpH } = draws[di];
       const uniBuf = this._uniPool[uniBufIdx];
       const bgl0   = pipeline.getBindGroupLayout(0);
       const bgl1   = pipeline.getBindGroupLayout(1);
-      const bg0    = device.createBindGroup({ layout: bgl0, entries: [
-        { binding: 0, resource: { buffer: uniBuf, size: uniSize } },
-      ]});
-      const bg1    = device.createBindGroup({ layout: bgl1, entries: [
-        { binding: 0, resource: { buffer: this.arenaGpuBuf } },
-      ]});
+      this._indicatorBg0Desc.layout = bgl0;
+      this._indicatorBg0Entries[0].resource.buffer = uniBuf;
+      this._indicatorBg0Entries[0].resource.size = uniSize;
+      const bg0 = device.createBindGroup(this._indicatorBg0Desc);
+      this._indicatorBg1Desc.layout = bgl1;
+      this._indicatorBg1Entries[0].resource.buffer = this.arenaGpuBuf;
+      const bg1 = device.createBindGroup(this._indicatorBg1Desc);
       pass.setViewport(0, vpY, plotW, vpH, 0, 1);
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bg0);
@@ -946,7 +964,8 @@ export class GpuRenderer {
       pass.draw(drawCount);
     }
     pass.end();
-    queue.submit([encoder.finish()]);
+    this._submitCmds[0] = encoder.finish();
+    queue.submit(this._submitCmds);
 
     // ── DEV-ONLY: Report Total VRAM Usage once every 2 seconds ──
     // const mb = (this._vramTotalBytes / 1024 / 1024).toFixed(3);
@@ -961,7 +980,7 @@ export class GpuRenderer {
 
   /** Pack 64B thick-line uniform into `dv`. */
   _packThickLineUni(dv, plotW, plotH, candleW, priceMin, priceMax,
-                    arenaOffset, barCount, warmup, lineWidthPx, r, g, b, a, visBc) {
+                    arenaOffset, barCount, warmup, lineWidthPx, r, g, b, a, visBc, offsetSlots) {
     dv.setFloat32( 0, plotW,       true);  // plot_w
     dv.setFloat32( 4, plotH,       true);  // plot_h
     dv.setFloat32( 8, candleW,     true);  // candle_w
@@ -973,12 +992,12 @@ export class GpuRenderer {
     dv.setFloat32(32, r, true); dv.setFloat32(36, g, true);
     dv.setFloat32(40, b, true); dv.setFloat32(44, a, true);
     dv.setUint32 (48, barCount,    true);  // bar_count
-    dv.setUint32 (52, visBc, true); dv.setUint32(56, 0, true); dv.setUint32(60, 0, true);
+    dv.setUint32 (52, visBc, true); dv.setUint32(56, 0, true); dv.setFloat32(60, offsetSlots, true);
   }
 
   /** Pack 80B histogram uniform into `dv`. */
   _packHistogramUni(dv, plotW, plotH, candleW, valueMin, valueMax,
-                    arenaOffset, barCount, warmup, r, g, b, a, visBc) {
+                    arenaOffset, barCount, warmup, r, g, b, a, visBc, offsetSlots) {
     dv.setFloat32( 0, plotW,       true);
     dv.setFloat32( 4, plotH,       true);
     dv.setFloat32( 8, candleW,     true);
@@ -993,12 +1012,12 @@ export class GpuRenderer {
     dv.setFloat32(56, b * 0.6, true); dv.setFloat32(60, a,       true);
     dv.setUint32 (64, barCount,    true);
     dv.setFloat32(68, 0.1,         true);  // bar_gap (10%)
-    dv.setUint32 (72, visBc, true); dv.setUint32(76, 0, true);
+    dv.setUint32 (72, visBc, true); dv.setFloat32(76, offsetSlots, true);
   }
 
   /** Pack 64B band uniform into `dv`. */
   _packBandUni(dv, plotW, plotH, candleW, priceMin, priceMax,
-               arenaOffUpper, arenaOffLower, barCount, warmup, r, g, b, a, visBc) {
+               arenaOffUpper, arenaOffLower, barCount, warmup, r, g, b, a, visBc, offsetSlots) {
     dv.setFloat32( 0, plotW,         true);
     dv.setFloat32( 4, plotH,         true);
     dv.setFloat32( 8, candleW,       true);
@@ -1010,7 +1029,7 @@ export class GpuRenderer {
     dv.setFloat32(32, r, true); dv.setFloat32(36, g, true);
     dv.setFloat32(40, b, true); dv.setFloat32(44, a * 0.15, true);  // 15% fill
     dv.setUint32 (48, barCount,      true);
-    dv.setUint32 (52, visBc, true); dv.setUint32(56, 0, true); dv.setUint32(60, 0, true);
+    dv.setUint32 (52, visBc, true); dv.setUint32(56, 0, true); dv.setFloat32(60, offsetSlots, true);
   }
 
   /**
@@ -1020,6 +1039,7 @@ export class GpuRenderer {
    */
   _ensureUniPool(count) {
     while (this._uniPool.length < count) {
+      // @zero_alloc_allow: Uniform pool grows only when visible indicator command count increases after plan changes.
       this._uniPool.push(this.device.createBuffer({
         size:  80,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1072,16 +1092,21 @@ export class GpuRenderer {
     let entry = this.smaLineBufs.get(smaByteOff);
     if (!entry || entry.size < needed) {
       entry?.buf?.destroy();
+      // @zero_alloc_allow: Legacy SMA GPU buffer grows only on first use or when visible range exceeds previous capacity.
       const buf = device.createBuffer({
         size:  needed,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       });
+      // @zero_alloc_allow: Legacy SMA metadata object is created only when the backing GPU buffer is grown or first initialized.
       entry = { buf, size: needed };
       this.smaLineBufs.set(smaByteOff, entry);
     }
 
     // Single memcpy: frameBuf (SAB) → GPU buffer
-    queue.writeBuffer(entry.buf, 0, new Float32Array(frameBuf, smaByteOff, viewLen));
+    const src = smaByteOff === FBUF_SMA20_OFF ? this._fbSma20
+      : smaByteOff === FBUF_SMA50_OFF ? this._fbSma50
+      : this._fbSma100;
+    queue.writeBuffer(entry.buf, 0, src, 0, viewLen);
   }
 
   /**
@@ -1102,17 +1127,9 @@ export class GpuRenderer {
     if (!this.vpBuffer || this.vpBuffer.size < binBytes) {
       this.vpBuffer?.destroy?.();
       // include COPY_DST so we can write zeros via queue.writeBuffer
+      // @zero_alloc_allow: Volume profile buffer grows only if a larger bin count is requested.
       this.vpBuffer = device.createBuffer({ size: binBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
-    // zero all bins (including the global-max slot)
-
-    // Using writeBuffer with a cached empty buffer or just dynamic allocation? 
-    // Usually clearBuffer is best: encoder.clearBuffer()
-    // However, writeBuffer is fine, let's optimize the Uint32Array allocation
-    if (!this._vpZeroBuf || this._vpZeroBuf.length < binCount) {
-        this._vpZeroBuf = new Uint32Array(binCount);
-    }
-    // since _vpZeroBuf is cached and we only need zeros, slicing/subarray if it's bigger is needed
     queue.writeBuffer(this.vpBuffer, 0, this._vpZeroBuf.subarray(0, binCount));
 
     // params buffer: total_len, start_index, visible_count, num_bins, price_min(f32), price_max(f32)
@@ -1124,23 +1141,26 @@ export class GpuRenderer {
     dv.setUint32(12, numBins, true);
     dv.setFloat32(16, priceMin, true);
     dv.setFloat32(20, priceMax, true);
-    if (!this.vpParamsBuf) this.vpParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    if (!this.vpParamsBuf) {
+      // @zero_alloc_allow: Volume profile params buffer is allocated once on first use when init path did not provision it.
+      this.vpParamsBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    }
     queue.writeBuffer(this.vpParamsBuf, 0, pbuf);
-    if (!this.vpPipeline) this.vpPipeline = this._makeComputePipeline(this._vpWgsl);
 
     const encoder = device.createCommandEncoder();
     const bgl = this.vpPipeline.getBindGroupLayout(0);
-    const bg = device.createBindGroup({ layout: bgl, entries: [
-      { binding: 0, resource: { buffer: this.storageBuf } },
-      { binding: 1, resource: { buffer: this.vpBuffer } },
-      { binding: 2, resource: { buffer: this.vpParamsBuf } },
-    ]});
+    this._vpComputeBgDesc.layout = bgl;
+    this._vpComputeBgEntries[0].resource.buffer = this.storageBuf;
+    this._vpComputeBgEntries[1].resource.buffer = this.vpBuffer;
+    this._vpComputeBgEntries[2].resource.buffer = this.vpParamsBuf;
+    const bg = device.createBindGroup(this._vpComputeBgDesc);
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.vpPipeline);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(Math.ceil(viewLen / 64));
     pass.end();
-    device.queue.submit([encoder.finish()]);
+    this._submitCmds[0] = encoder.finish();
+    device.queue.submit(this._submitCmds);
   }
 
   /** @param {string} wgsl @returns {GPURenderPipeline} */

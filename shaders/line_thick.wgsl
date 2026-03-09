@@ -37,7 +37,7 @@ struct Uniforms {
     bar_count     : u32,
     nan_start     : u32,
     slots         : u32,
-    _pad3         : u32,
+    offset_slots  : f32,
 }
 
 @group(0) @binding(0) var<uniform>       u:      Uniforms;
@@ -80,8 +80,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     let slot_w      = u.plot_w / logical_len;
 
     // Bar-centre screen-pixel X
-    let x0_px = (f32(i0) + 0.5) * slot_w;
-    let x1_px = (f32(i1) + 0.5) * slot_w;
+    let x0_px = (f32(i0) + 0.5 - u.offset_slots) * slot_w;
+    let x1_px = (f32(i1) + 0.5 - u.offset_slots) * slot_w;
 
     // Price → screen-pixel Y  (screen Y increases downward, NDC Y increases upward)
     let v0    = values[i0];

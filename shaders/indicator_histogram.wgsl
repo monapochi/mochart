@@ -38,7 +38,7 @@ struct Uniforms {
     bar_count    : u32,         // offset 64
     bar_gap      : f32,
     slots        : u32,
-    _pad1        : u32,
+    offset_slots : f32,
 }
 
 @group(0) @binding(0) var<uniform>       u     : Uniforms;
@@ -85,7 +85,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     let bar_w       = max(slot_w - gap_px, 1.0);
 
     // X extents of bar
-    let x_left  = f32(bar_idx) * slot_w + gap_px * 0.5;
+    let x_left  = (f32(bar_idx) - u.offset_slots) * slot_w + gap_px * 0.5;
     let x_right = x_left + bar_w;
 
     // Y extents — value → pixel Y (Y increases top→bottom)
