@@ -502,7 +502,7 @@ self.onmessage = async (evt) => {
   if (evt.data.type === 'set_data_binary') {
     if (!WasmModule || !wasmMemory) return;
     try {
-      const { store: nextStore, barCount } = ingestBinaryOhlcvBuffer(evt.data.data, wasmMemory);
+      const { store: nextStore, barCount } = ingestBinaryOhlcvBuffer(evt.data.data);
       if (store && store.free) store.free();
       store = nextStore;
       totalBars = barCount;
@@ -543,7 +543,7 @@ self.onmessage = async (evt) => {
         next = ingestJsonBars(json, wasmMemory);
       } else {
         const ab = await resp.arrayBuffer();
-        next = ingestBinaryOhlcvBuffer(ab, wasmMemory);
+        next = ingestBinaryOhlcvBuffer(ab);
       }
 
       if (store && store.free) store.free();
@@ -695,7 +695,7 @@ self.onmessage = async (evt) => {
       store = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
       totalBars = 0;
     } else {
-      const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin', wasmMemory);
+      const { store: s, barCount } = await loadBinaryOhlcv('../MSFT.bin');
       store     = s;
       totalBars = barCount;
       console.log(`[data_worker] ingested ${barCount} bars`);
@@ -893,68 +893,23 @@ function _writeIndSab(_visBars, revision) {
 }
 
 // ── OHLCV loader (same as render_worker.js) ───────────────────────────────
-async function loadBinaryOhlcv(url, memory) {
+async function loadBinaryOhlcv(url) {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url}: ${resp.status}`);
   const ab = await resp.arrayBuffer();
-  const N  = new Uint32Array(ab, 0, 1)[0];
-
-  const OFF_TIME   = 8;
-  const OFF_OPEN   = 8 + N * 8;
-  const OFF_HIGH   = OFF_OPEN   + N * 4;
-  const OFF_LOW    = OFF_HIGH   + N * 4;
-  const OFF_CLOSE  = OFF_LOW    + N * 4;
-  const OFF_VOLUME = OFF_CLOSE  + N * 4;
-
-  const srcClose  = new Float32Array(ab, OFF_CLOSE, N);
-  const tickSize  = estimateTickSize(srcClose);
-  const basePrice = srcClose[0] ?? 100.0;
-
-  const newStore  = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
-
-  new Float64Array(memory.buffer, newStore.ingest_time_ptr(),   N).set(new Float64Array(ab, OFF_TIME,   N));
-  new Float32Array(memory.buffer, newStore.ingest_open_ptr(),   N).set(new Float32Array(ab, OFF_OPEN,   N));
-  new Float32Array(memory.buffer, newStore.ingest_high_ptr(),   N).set(new Float32Array(ab, OFF_HIGH,   N));
-  new Float32Array(memory.buffer, newStore.ingest_low_ptr(),    N).set(new Float32Array(ab, OFF_LOW,    N));
-  new Float32Array(memory.buffer, newStore.ingest_close_ptr(),  N).set(srcClose);
-  new Float32Array(memory.buffer, newStore.ingest_volume_ptr(), N).set(new Float32Array(ab, OFF_VOLUME, N));
-
-  newStore.commit_ingestion(N);
-  newStore.free_ingest_buffers();
-
-  return { store: newStore, barCount: N };
+  return ingestBinaryOhlcvBuffer(ab);
 }
 
-function ingestBinaryOhlcvBuffer(ab, memory) {
+function ingestBinaryOhlcvBuffer(ab) {
   const N = new Uint32Array(ab, 0, 1)[0] || 0;
   if (N <= 0) {
     const emptyStore = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
     return { store: emptyStore, barCount: 0 };
   }
 
-  const OFF_TIME   = 8;
-  const OFF_OPEN   = 8 + N * 8;
-  const OFF_HIGH   = OFF_OPEN   + N * 4;
-  const OFF_LOW    = OFF_HIGH   + N * 4;
-  const OFF_CLOSE  = OFF_LOW    + N * 4;
-  const OFF_VOLUME = OFF_CLOSE  + N * 4;
-
-  const srcClose = new Float32Array(ab, OFF_CLOSE, N);
-  const tickSize = estimateTickSize(srcClose);
-  const basePrice = srcClose[0] ?? 100.0;
-
-  const nextStore = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
-
-  new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), N).set(new Float64Array(ab, OFF_TIME, N));
-  new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), N).set(new Float32Array(ab, OFF_OPEN, N));
-  new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), N).set(new Float32Array(ab, OFF_HIGH, N));
-  new Float32Array(memory.buffer, nextStore.ingest_low_ptr(), N).set(new Float32Array(ab, OFF_LOW, N));
-  new Float32Array(memory.buffer, nextStore.ingest_close_ptr(), N).set(srcClose);
-  new Float32Array(memory.buffer, nextStore.ingest_volume_ptr(), N).set(new Float32Array(ab, OFF_VOLUME, N));
-
-  nextStore.commit_ingestion(N);
-  nextStore.free_ingest_buffers();
-  return { store: nextStore, barCount: N };
+  const nextStore = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
+  const ingested = nextStore.ingest_binary_ohlcv(new Uint8Array(ab));
+  return { store: nextStore, barCount: ingested | 0 };
 }
 
 function ingestSoaPayload(payload, memory) {
@@ -971,9 +926,7 @@ function ingestSoaPayload(payload, memory) {
   const close = new Float32Array(payload.close);
   const volume = new Float32Array(payload.volume);
 
-  const tickSize = estimateTickSize(close);
-  const basePrice = close[0] ?? 100.0;
-  const nextStore = new WasmModule.OhlcvStore(tickSize, basePrice, N + 64, 1024);
+  const nextStore = new WasmModule.OhlcvStore(0.01, 100.0, N + 64, 1024);
 
   new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), N).set(time.subarray(0, N));
   new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), N).set(open.subarray(0, N));
@@ -982,9 +935,7 @@ function ingestSoaPayload(payload, memory) {
   new Float32Array(memory.buffer, nextStore.ingest_close_ptr(), N).set(close.subarray(0, N));
   new Float32Array(memory.buffer, nextStore.ingest_volume_ptr(), N).set(volume.subarray(0, N));
 
-  nextStore.commit_ingestion(N);
-  nextStore.free_ingest_buffers();
-  return { store: nextStore, barCount: N };
+  return finalizeIngestedStore(nextStore, N);
 }
 
 function ingestJsonBars(json, memory) {
@@ -1023,14 +974,9 @@ function ingestJsonBars(json, memory) {
   return ingestSoaPayload({ count: N, time: time.buffer, open: open.buffer, high: high.buffer, low: low.buffer, close: close.buffer, volume: volume.buffer }, memory);
 }
 
-function estimateTickSize(closes) {
-  let minDiff = Infinity;
-  const n = Math.min(closes.length, 100);
-  for (let i = 1; i < n; i++) {
-    const d = Math.abs(closes[i] - closes[i - 1]);
-    if (d > 1e-9 && d < minDiff) minDiff = d;
-  }
-  if (!isFinite(minDiff)) return 0.01;
-  const mag = 10 ** (-Math.floor(Math.log10(Math.max(minDiff, 1e-9))));
-  return Math.round(minDiff * mag) / mag;
+function finalizeIngestedStore(store, count) {
+  store.configure_price_scale_from_ingest(count);
+  store.commit_ingestion(count);
+  store.free_ingest_buffers();
+  return { store, barCount: count };
 }

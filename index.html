@@ -47,14 +47,14 @@
       overflow: hidden;
     }
 
-    #chart-gpu, #chart-hud {
+    #chart-host {
       position: absolute;
       inset: 0;
       width: 100%;
       height: 100%;
       display: block;
+      z-index: 0;
     }
-    #chart-hud { pointer-events: none; }
 
     /* top bar */
     #hero-header {
@@ -490,8 +490,7 @@
 
 <!-- ────────────────────── HERO ──────────────────────────────────────────── -->
 <div id="hero">
-  <canvas id="chart-gpu"></canvas>
-  <canvas id="chart-hud"></canvas>
+  <div id="chart-host" aria-hidden="true"></div>
 
   <header id="hero-header">
     <span class="brand">MO<span>CHART</span></span>
@@ -689,17 +688,16 @@
 
 <!--
   chart_host_lp.js:
-  - Initialises dual canvas (GPU + HUD)
-  - Spawns DataWorker with { synthetic: true, barCount: 1_000_000 }
-  - Spawns RenderWorker with OffscreenCanvas
-  - Writes viewport SAB on every rAF tick
+  - Imports the public Mochart bundle from docs/lib/
+  - Calls createChart() on the landing-page hero container
+  - Exercises the packaged worker-backed runtime exactly like an npm consumer
 
   IMPORTANT: The module requires crossOriginIsolated (SharedArrayBuffer).
   coi-serviceworker.js enables this via SW + page reload, but that is async.
   We must guard the module load to avoid executing before isolation is active.
 -->
 <script>
-  const LP_ASSET_VERSION = '20260309b';
+  const LP_ASSET_VERSION = '20260310a';
   if (window.crossOriginIsolated) {
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');

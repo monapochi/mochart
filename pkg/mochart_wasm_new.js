@@ -497,6 +497,13 @@ export class OhlcvStore {
         wasm.__wbg_ohlcvstore_free(ptr, 0);
     }
     /**
+     * @returns {number}
+     */
+    base_price() {
+        const ret = wasm.ohlcvstore_base_price(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * JS側で Ingestion Buffer に書き込んだ後、この関数を呼んで圧縮・保存する
      * @param {number} count
      */
@@ -530,6 +537,19 @@ export class OhlcvStore {
      */
     compute_sma(period) {
         wasm.ohlcvstore_compute_sma(this.__wbg_ptr, period);
+    }
+    /**
+     * Configure quantization parameters directly from the already-populated
+     * ingest_close staging buffer.
+     *
+     * This keeps JS as a thin transport layer: JS copies source closes into
+     * WASM-owned staging memory once, then Rust derives `tick_size` and
+     * `base_price` in-place before `commit_ingestion()`. No extra TypedArray
+     * creation or second JS-side scan is required.
+     * @param {number} count
+     */
+    configure_price_scale_from_ingest(count) {
+        wasm.ohlcvstore_configure_price_scale_from_ingest(this.__wbg_ptr, count);
     }
     /**
      * Decompress the entire dataset into a single contiguous buffer.
@@ -609,6 +629,34 @@ export class OhlcvStore {
     indicator_valid_start() {
         const ret = wasm.ohlcvstore_indicator_valid_start(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Ingest MSFT.bin-compatible SoA binary directly.
+     *
+     * Layout:
+     * - bytes[0..4]  : little-endian u32 bar count
+     * - bytes[4..8]  : reserved/padding
+     * - bytes[8..]   : time[f64; N] | open[f32; N] | high[f32; N] |
+     *                  low[f32; N] | close[f32; N] | volume[f32; N]
+     *
+     * Memory mechanics:
+     * - JS performs a single Uint8Array handoff for the packed blob.
+     * - Rust derives price scale from the close lane, reserves compressed
+     *   output capacity once, then streams directly into the delta-delta
+     *   columns via `push_internal()`.
+     * - This removes six per-channel JS `.set(...)` copies from the binary
+     *   path while preserving the current 2-worker publication boundary.
+     * @param {Uint8Array} bytes
+     * @returns {number}
+     */
+    ingest_binary_ohlcv(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.ohlcvstore_ingest_binary_ohlcv(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] >>> 0;
     }
     /**
      * @returns {number}
@@ -694,6 +742,13 @@ export class OhlcvStore {
      */
     prepare_frame(canvas_w, canvas_h, candle_w, flags) {
         wasm.ohlcvstore_prepare_frame(this.__wbg_ptr, canvas_w, canvas_h, candle_w, flags);
+    }
+    /**
+     * @returns {number}
+     */
+    tick_size() {
+        const ret = wasm.ohlcvstore_tick_size(this.__wbg_ptr);
+        return ret;
     }
     /**
      * @returns {number}
@@ -1103,6 +1158,13 @@ function handleError(f, args) {
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
