@@ -6,7 +6,7 @@
  * the LP can run through createChart() just like an external consumer.
  */
 
-const LP_BUILD_VERSION = '20260310a';
+const LP_BUILD_VERSION = '20260310c';
 const PERF_INTERVAL_MS = 250;
 const DEFAULT_VISIBLE_BARS = 200;
 const DEFAULT_PANES = { gap: 2, weights: [7, 1.5, 1.5] };
