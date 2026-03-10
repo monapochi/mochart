@@ -50,6 +50,13 @@ const STYLE_THICK_LINE = 1;
 const STYLE_HISTOGRAM  = 2;
 const STYLE_BAND       = 3;
 
+const DEFAULT_VIEWPORT_SHIFT = Object.freeze({ panOffsetPx: 0, extraLeftBars: 0, rightMarginBars: 0 });
+const LEGACY_SMA_SPECS = Object.freeze([
+  Object.freeze({ key: 0, flag: 1, period: 20, byteOff: FBUF_SMA20_OFF, color: Object.freeze([0.00, 0.56, 0.73, 1.0]) }),
+  Object.freeze({ key: 1, flag: 2, period: 50, byteOff: FBUF_SMA50_OFF, color: Object.freeze([1.00, 0.76, 0.03, 1.0]) }),
+  Object.freeze({ key: 2, flag: 4, period: 100, byteOff: FBUF_SMA100_OFF, color: Object.freeze([0.91, 0.12, 0.39, 1.0]) }),
+]);
+
 // ── GpuRenderer ────────────────────────────────────────────────────────────
 
 export class GpuRenderer {
@@ -166,16 +173,37 @@ export class GpuRenderer {
   /** @type {Float32Array|null} */ _indArenaView = null;
   /** @type {number} */            _indArenaViewCap = 0;
 
-  // ── Pre-allocated SoA views on frameBuf for GPU upload (set by setFrameBuf) ──
+  // ── Pre-allocated SoA views on legacy frameBuf for GPU upload ──
   /** @type {Float32Array|null} */ _fbOpen  = null;
   /** @type {Float32Array|null} */ _fbHigh  = null;
   /** @type {Float32Array|null} */ _fbLow   = null;
   /** @type {Float32Array|null} */ _fbClose = null;
   /** @type {Float32Array|null} */ _fbVol   = null;
-  /** @type {Float32Array|null} */ _fbSma20 = null;
-  /** @type {Float32Array|null} */ _fbSma50 = null;
-  /** @type {Float32Array|null} */ _fbSma100 = null;
+  /** @type {(Float32Array|null)[]} */ _legacySmaViews = [null, null, null];
   /** @type {boolean} */ _hasLegacySmaFrameChannels = false;
+  _legacyFrameParams = {
+    startBar: 0,
+    visBars: 0,
+    plotW: 0,
+    plotH: 0,
+    candleW: 1,
+    pmin: 0,
+    pmax: 1,
+    flags: 0,
+  };
+
+  _readLegacyFrameParams(fdbHdr) {
+    const out = this._legacyFrameParams;
+    out.startBar = fdbHdr.getUint32(FBUF_START_BAR, true);
+    out.visBars = fdbHdr.getUint32(FBUF_VIS_BARS, true);
+    out.plotW = fdbHdr.getFloat32(FBUF_CANVAS_W, true);
+    out.plotH = fdbHdr.getFloat32(FBUF_CANVAS_H, true);
+    out.candleW = fdbHdr.getFloat32(FBUF_CANDLE_W, true);
+    out.pmin = fdbHdr.getFloat32(FBUF_PRICE_MIN, true);
+    out.pmax = fdbHdr.getFloat32(FBUF_PRICE_MAX, true);
+    out.flags = fdbHdr.getUint32(FBUF_FLAGS, true);
+    return out;
+  }
 
   // Timestamp query resources
   /** @type {GPUQuerySet|null} */ timestampQuerySet = null;
@@ -366,16 +394,40 @@ export class GpuRenderer {
   }
 
   /**
+   * Legacy frameBuf-based GPU entrypoint retained for render_worker compatibility.
+   * Unified worker should call drawGpuDirect().
+   *
+   * @param {DataView} fdbHdr
+   * @param {number} viewLen
+   * @returns {[number, number]}
+   */
+  /** @zero_alloc */
+  drawGpu(fdbHdr, viewLen, viewportShift = DEFAULT_VIEWPORT_SHIFT) {
+    return this._drawGpuInternal(this._readLegacyFrameParams(fdbHdr), viewLen, viewportShift || DEFAULT_VIEWPORT_SHIFT);
+  }
+
+  /**
+   * Unified worker entrypoint using direct frame state instead of legacy FDB header scratch.
+   *
+   * @param {{startBar:number, visBars:number, physW:number, physH:number, candleW:number, priceMin:number, priceMax:number, flags:number}} frameState
+   * @param {number} viewLen
+   * @returns {[number, number]}
+   */
+  /** @zero_alloc */
+  drawGpuDirect(frameState, viewLen, viewportShift = DEFAULT_VIEWPORT_SHIFT) {
+    return this._drawGpuInternal(frameState, viewLen, viewportShift || DEFAULT_VIEWPORT_SHIFT);
+  }
+
+  /**
    * Render one GPU frame: candles (minmax compute) + SMA overlay lines.
    * Returns the padded price range [pMin, pMax] for the HUD.
    *
-   * @param {SharedArrayBuffer} frameBuf
-   * @param {DataView}  fdbHdr   — DataView on frameBuf header (bytes 0-127)
+  * @param {{startBar:number, visBars:number, plotW?:number, plotH?:number, physW?:number, physH?:number, candleW:number, pmin?:number, pmax?:number, priceMin?:number, priceMax?:number, flags:number}} frameParams
    * @param {number}    viewLen  — actual bar count from FDB
    * @returns {[number, number]}  [paddedMin, paddedMax]
    */
   /** @zero_alloc */
-  drawGpu(frameBuf, fdbHdr, viewLen, viewportShift = { panOffsetPx: 0, extraLeftBars: 0 }) {
+  _drawGpuInternal(frameParams, viewLen, viewportShift = DEFAULT_VIEWPORT_SHIFT) {
     if (viewLen === 0) {
       this._priceRangeOut[0] = 0;
       this._priceRangeOut[1] = 1;
@@ -384,14 +436,14 @@ export class GpuRenderer {
     const { device } = this;
     const queue = device.queue;
 
-    const startBar = fdbHdr.getUint32 (FBUF_START_BAR, true);
-    const visBc    = fdbHdr.getUint32 (FBUF_VIS_BARS,  true);
-    const plotW    = fdbHdr.getFloat32(FBUF_CANVAS_W,  true);
-    const plotH    = fdbHdr.getFloat32(FBUF_CANVAS_H,  true);
-    const candleW  = fdbHdr.getFloat32(FBUF_CANDLE_W,  true);
-    const pmin     = fdbHdr.getFloat32(FBUF_PRICE_MIN, true);
-    const pmax     = fdbHdr.getFloat32(FBUF_PRICE_MAX, true);
-    const flags    = fdbHdr.getUint32 (FBUF_FLAGS,     true);
+    const startBar = frameParams.startBar;
+    const visBc = frameParams.visBars;
+    const plotW = frameParams.plotW ?? frameParams.physW;
+    const plotH = frameParams.plotH ?? frameParams.physH;
+    const candleW = frameParams.candleW;
+    const pmin = frameParams.pmin ?? frameParams.priceMin;
+    const pmax = frameParams.pmax ?? frameParams.priceMax;
+    const flags = frameParams.flags;
     const rightMarginBars = (flags & 0x08) !== 0 ? Math.max(0, viewportShift.rightMarginBars | 0) : 0;
     const totalSlots = Math.max(1, visBc + rightMarginBars);
     const slotW    = plotW / totalSlots;
@@ -437,9 +489,7 @@ export class GpuRenderer {
     // all indicator data and the legacy per-period buffers are not needed.
     if (!this.indSab && this._hasLegacySmaFrameChannels) {
       try {
-        if (flags & 1) this._uploadSmaToBuf(viewLen, FBUF_SMA20_OFF,  frameBuf);
-        if (flags & 2) this._uploadSmaToBuf(viewLen, FBUF_SMA50_OFF,  frameBuf);
-        if (flags & 4) this._uploadSmaToBuf(viewLen, FBUF_SMA100_OFF, frameBuf);
+        this._uploadLegacySmaBuffers(flags, viewLen);
       } catch (e) { console.warn('[gpu_renderer] SMA upload failed:', e); }
     }
 
@@ -523,11 +573,7 @@ export class GpuRenderer {
       // EP pipeline: arena-driven draw loop (replaces legacy per-SMA calls).
       this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, visBc, offsetSlots);
     } else if (this._hasLegacySmaFrameChannels) {
-      // Legacy SMA overlay — used when indSab is not set (no EP integration).
-      // nanStart heuristic: bars before (period-1) have incomplete history.
-      if (flags & 1) this._drawSmaLine(FBUF_SMA20_OFF,  viewLen, Math.max(0, 20  - 1 - startBar), plotW, mainH, candleW, paddedMin, paddedMax, 0.00, 0.56, 0.73, 1.0, DPR * 1.5, visBc);
-      if (flags & 2) this._drawSmaLine(FBUF_SMA50_OFF,  viewLen, Math.max(0, 50  - 1 - startBar), plotW, mainH, candleW, paddedMin, paddedMax, 1.00, 0.76, 0.03, 1.0, DPR * 1.5, visBc);
-      if (flags & 4) this._drawSmaLine(FBUF_SMA100_OFF, viewLen, Math.max(0, 100 - 1 - startBar), plotW, mainH, candleW, paddedMin, paddedMax, 0.91, 0.12, 0.39, 1.0, DPR * 1.5, visBc);
+      this._drawLegacySmaOverlays(flags, viewLen, startBar, plotW, mainH, candleW, paddedMin, paddedMax, DPR, visBc);
     }
 
     // ── 7. Volume Profile Heatmap ─────────────────────────────────────────
@@ -545,14 +591,15 @@ export class GpuRenderer {
    * Assumes SMA data is already in the GPU buffer (uploaded by _uploadSmaToBuf).
    * @private
    */
-  _drawSmaLine(smaByteOff, viewLen, nanStart, plotW, plotH, candleW,
+  _drawSmaLine(specIndex, viewLen, nanStart, plotW, plotH, candleW,
                priceMin, priceMax, r, g, b, a, lineWidthPx, visBc) {
     if (viewLen < 2) return;
     const { device } = this;
     const queue = device.queue;
 
     // Lookup pre-uploaded SMA GPU buffer
-    const entry = this.smaLineBufs.get(smaByteOff);
+    const spec = LEGACY_SMA_SPECS[specIndex];
+    const entry = this.smaLineBufs.get(spec.byteOff);
     if (!entry) return;  // _uploadSmaToBuf wasn't called — skip
 
     // Pack 64B line uniforms (reuse pre-allocated _lineUbuf)
@@ -659,12 +706,12 @@ export class GpuRenderer {
   }
 
   /**
-   * Create pre-allocated max-capacity SoA views on frameBuf.
+   * Create pre-allocated max-capacity SoA views on the legacy frameBuf.
    * Called once at init by render_worker; views are reused every drawGpu frame.
    * Eliminates 5× `new Float32Array(frameBuf, ...)` per frame for queue.writeBuffer.
    * @param {SharedArrayBuffer} fbuf
    */
-  setFrameBufViews(fbuf) {
+  setLegacyFrameBufViews(fbuf) {
     this._fbOpen  = new Float32Array(fbuf, FBUF_OPEN_OFF,  FRAME_MAX_BARS);
     this._fbHigh  = new Float32Array(fbuf, FBUF_HIGH_OFF,  FRAME_MAX_BARS);
     this._fbLow   = new Float32Array(fbuf, FBUF_LOW_OFF,   FRAME_MAX_BARS);
@@ -673,14 +720,33 @@ export class GpuRenderer {
     const legacySmaBytes = FBUF_SMA100_OFF + FRAME_MAX_BARS * 4;
     this._hasLegacySmaFrameChannels = fbuf.byteLength >= legacySmaBytes;
     if (this._hasLegacySmaFrameChannels) {
-      this._fbSma20  = new Float32Array(fbuf, FBUF_SMA20_OFF, FRAME_MAX_BARS);
-      this._fbSma50  = new Float32Array(fbuf, FBUF_SMA50_OFF, FRAME_MAX_BARS);
-      this._fbSma100 = new Float32Array(fbuf, FBUF_SMA100_OFF, FRAME_MAX_BARS);
+      for (let index = 0; index < LEGACY_SMA_SPECS.length; index++) {
+        const spec = LEGACY_SMA_SPECS[index];
+        this._legacySmaViews[index] = new Float32Array(fbuf, spec.byteOff, FRAME_MAX_BARS);
+      }
     } else {
-      this._fbSma20 = null;
-      this._fbSma50 = null;
-      this._fbSma100 = null;
+      this._legacySmaViews[0] = null;
+      this._legacySmaViews[1] = null;
+      this._legacySmaViews[2] = null;
     }
+  }
+
+  /**
+  * Override the active OHLCV views consumed by drawGpuDirect().
+  * This allows the renderer to consume direct wasm views
+   * without changing the hot upload path.
+   * @param {Float32Array} open
+   * @param {Float32Array} high
+   * @param {Float32Array} low
+   * @param {Float32Array} close
+   * @param {Float32Array} vol
+   */
+  setFrameViews(open, high, low, close, vol) {
+    this._fbOpen = open;
+    this._fbHigh = high;
+    this._fbLow = low;
+    this._fbClose = close;
+    this._fbVol = vol;
   }
 
   /**
@@ -696,10 +762,30 @@ export class GpuRenderer {
     for (const { buf } of this.smaLineBufs.values()) buf.destroy();
     this.smaLineBufs.clear();
     if (this.lineUniBuf) { this.lineUniBuf.destroy(); this.lineUniBuf = null; }
-    this._fbSma20 = null;
-    this._fbSma50 = null;
-    this._fbSma100 = null;
+    this._legacySmaViews[0] = null;
+    this._legacySmaViews[1] = null;
+    this._legacySmaViews[2] = null;
     this._hasLegacySmaFrameChannels = false;
+  }
+
+  _uploadLegacySmaBuffers(flags, viewLen) {
+    for (let index = 0; index < LEGACY_SMA_SPECS.length; index++) {
+      const spec = LEGACY_SMA_SPECS[index];
+      if ((flags & spec.flag) !== 0) this._uploadSmaToBuf(viewLen, index);
+    }
+  }
+
+  _drawLegacySmaOverlays(flags, viewLen, startBar, plotW, plotH, candleW, priceMin, priceMax, DPR, visBc) {
+    for (let index = 0; index < LEGACY_SMA_SPECS.length; index++) {
+      const spec = LEGACY_SMA_SPECS[index];
+      if ((flags & spec.flag) === 0) continue;
+      const nanStart = Math.max(0, spec.period - 1 - startBar);
+      const r = spec.color[0];
+      const g = spec.color[1];
+      const b = spec.color[2];
+      const a = spec.color[3];
+      this._drawSmaLine(index, viewLen, nanStart, plotW, plotH, candleW, priceMin, priceMax, r, g, b, a, DPR * 1.5, visBc);
+    }
   }
 
   /**
@@ -1067,6 +1153,7 @@ export class GpuRenderer {
 
   _configureContext(w, h) {
     if (!this.context || !this.device) return;
+    // @zero_alloc_allow: WebGPU context descriptor object is created only on resize/reconfigure, not per frame.
     this.context.configure({
       device:    this.device,
       format:    this.format,
@@ -1084,7 +1171,7 @@ export class GpuRenderer {
   }
 
   /**
-   * Upload CPU-precomputed SMA data from frameBuf (SharedArrayBuffer) into a GPU buffer.
+  * Upload CPU-precomputed SMA data from cached legacy SMA views into a GPU buffer.
    * data_worker already computes SMA with full lookback history via Rust, so the
    * values are correct. This is a simple CPU→GPU memcpy via writeBuffer.
    *
@@ -1094,17 +1181,17 @@ export class GpuRenderer {
    * extended with lookback history in a future optimization, this can be revisited.
    *
    * @param {number} viewLen    visible bar count
-   * @param {number} smaByteOff byte offset in frameBuf (e.g. FBUF_SMA20_OFF)
-   * @param {SharedArrayBuffer} frameBuf
+  * @param {number} specIndex index into the legacy SMA spec table
    * @private
    */
-  _uploadSmaToBuf(viewLen, smaByteOff, frameBuf) {
+  _uploadSmaToBuf(viewLen, specIndex) {
     if (!this.device) return;
     const device = this.device;
     const queue = device.queue;
     const needed = viewLen * 4;
+    const spec = LEGACY_SMA_SPECS[specIndex];
 
-    let entry = this.smaLineBufs.get(smaByteOff);
+    let entry = this.smaLineBufs.get(spec.byteOff);
     if (!entry || entry.size < needed) {
       entry?.buf?.destroy();
       // @zero_alloc_allow: Legacy SMA GPU buffer grows only on first use or when visible range exceeds previous capacity.
@@ -1114,13 +1201,11 @@ export class GpuRenderer {
       });
       // @zero_alloc_allow: Legacy SMA metadata object is created only when the backing GPU buffer is grown or first initialized.
       entry = { buf, size: needed };
-      this.smaLineBufs.set(smaByteOff, entry);
+      this.smaLineBufs.set(spec.byteOff, entry);
     }
 
-    // Single memcpy: frameBuf (SAB) → GPU buffer
-    const src = smaByteOff === FBUF_SMA20_OFF ? this._fbSma20
-      : smaByteOff === FBUF_SMA50_OFF ? this._fbSma50
-      : this._fbSma100;
+    // Single memcpy: cached legacy SMA view → GPU buffer
+    const src = this._legacySmaViews[specIndex];
     if (!src) return;
     queue.writeBuffer(entry.buf, 0, src, 0, viewLen);
   }

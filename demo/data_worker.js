@@ -1,5 +1,9 @@
 /**
- * data_worker.js — Data Worker for Mochart P1 Parallel Pipeline
+ * data_worker.js — Legacy split-path data worker for Mochart P1 Parallel Pipeline
+ *
+ * Compatibility note:
+ *   This file remains only for the old data_worker/render_worker split pipeline.
+ *   The crate demo's primary runtime path is unified_worker.js.
  *
  * Role: owns the WASM instance (OhlcvStore + ExecutionPlan).
  *   1. Fetch OHLCV binary and ingest into OhlcvStore.
@@ -34,6 +38,14 @@ const WASM_BINARY_PATHS = [
   `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
 ];
+const WASM_MODULE_PATHS_SHARED = [
+  `../../../../src/pkg-shared/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+  `../pkg-shared/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+];
+const WASM_BINARY_PATHS_SHARED = [
+  `../../../../src/pkg-shared/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
+  `../pkg-shared/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
+];
 let WasmModule = null; // will hold the imported module namespace
 let _wasmInitPromise = null; // ensures __wbg_init runs at most once per worker
 let _workerInitState = 0; // 0=idle, 1=initializing, 2=ready
@@ -45,6 +57,7 @@ import {
   i32ToF32,
   FRAME_MAX_BARS,
   FBUF_START_BAR, FBUF_VIS_BARS, FBUF_VIEW_LEN,
+  FBUF_VIEW_OPEN_PTR, FBUF_VIEW_HIGH_PTR, FBUF_VIEW_LOW_PTR, FBUF_VIEW_CLOSE_PTR, FBUF_VIEW_VOL_PTR, FBUF_VIEW_TIME_PTR,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX,
   FBUF_CANVAS_W, FBUF_CANVAS_H, FBUF_CANDLE_W,
   FBUF_FLAGS, FBUF_SEQ, FBUF_TOTAL_BARS,
@@ -96,6 +109,9 @@ self.addEventListener('unhandledrejection', (ev) => {
 /** @type {OhlcvStore} */   let store;
 /** @type {ExecutionPlan} */ let plan;
 /** @type {WebAssembly.Memory} */ let wasmMemory;
+/** @type {number} */ let _fdbBase = 0;
+/** @type {{enabled?: boolean, reason?: string | null} | null} */ let _sharedWasmCapability = null;
+/** @type {DataView|null} */ let _sharedFdbView = null;
 /** Total ingested bar count (set once after fetch). */
 let totalBars = 0;
 /** Monotone frame counter written to FBUF_SEQ and FCTRL_READY. */
@@ -323,6 +339,27 @@ function _applyAnnClear() {
 /** @type {Float32Array} */ let _dstClose;
 /** @type {Float32Array} */ let _dstVol;
 /** @type {Float64Array} */ let _dstTime;
+const _frameDescriptor = {
+  startBar: 0,
+  visBars: 0,
+  viewLen: 0,
+  flags: 0,
+  openPtr: 0,
+  highPtr: 0,
+  lowPtr: 0,
+  closePtr: 0,
+  volPtr: 0,
+  timePtr: 0,
+  frameSeq: 0,
+  totalBars: 0,
+  priceMin: 0,
+  priceMax: 1,
+  physW: 0,
+  physH: 0,
+  candleW: 1,
+  frameStartBar: 0,
+};
+const _indSabResizeMsg = { type: 'ind_sab_resize', slotId: 0, arenaF32Count: 0 };
 
 // ── Cached WASM memory views (refreshed only when memory.buffer identity changes) ──
 // After memory.grow(), the old ArrayBuffer is detached; we must detect and
@@ -334,6 +371,8 @@ function _applyAnnClear() {
 // Cached indSAB arena destination view — re-created only when arenaLen grows.
 /** @type {Float32Array|null} */  let _dstArena = null;
 /** @type {number} */             let _dstArenaCap = 0;
+/** @type {number} */             let _indSabArenaCap = 0;
+/** @type {number} */             let _pendingIndSabResize = 0;
 
 /** Refresh cached WASM memory views if the backing buffer has been detached. */
 function _refreshWasmViews() {
@@ -344,15 +383,53 @@ function _refreshWasmViews() {
     _wasmF32 = new Float32Array(buf);
     // @zero_alloc_allow: Recreate cached views only after wasm memory.grow detaches the previous buffer.
     _wasmF64 = new Float64Array(buf);
+    // @zero_alloc_allow: Recreate cached DataView only after wasm memory.grow detaches the previous buffer.
+    _sharedFdbView = (_sharedWasmCapability?.enabled && buf instanceof SharedArrayBuffer && _fdbBase > 0)
+      ? new DataView(buf, _fdbBase, FBUF_HDR_BYTES)
+      : null;
   }
 }
 
+function _getSharedWasmBuffer() {
+  if (!wasmMemory) return null;
+  const buf = wasmMemory.buffer;
+  return buf instanceof SharedArrayBuffer ? buf : null;
+}
+
+function _writeFrameDescriptor(targetView, descriptor) {
+  targetView.setUint32(FBUF_START_BAR, descriptor.startBar, true);
+  targetView.setUint32(FBUF_VIS_BARS, descriptor.visBars, true);
+  targetView.setUint32(FBUF_VIEW_LEN, descriptor.viewLen, true);
+  targetView.setUint32(FBUF_FLAGS, descriptor.flags, true);
+  targetView.setUint32(FBUF_VIEW_OPEN_PTR, descriptor.openPtr, true);
+  targetView.setUint32(FBUF_VIEW_HIGH_PTR, descriptor.highPtr, true);
+  targetView.setUint32(FBUF_VIEW_LOW_PTR, descriptor.lowPtr, true);
+  targetView.setUint32(FBUF_VIEW_CLOSE_PTR, descriptor.closePtr, true);
+  targetView.setUint32(FBUF_VIEW_VOL_PTR, descriptor.volPtr, true);
+  targetView.setUint32(FBUF_SEQ, descriptor.frameSeq, true);
+  targetView.setUint32(FBUF_TOTAL_BARS, descriptor.totalBars, true);
+  targetView.setFloat32(FBUF_PRICE_MIN, descriptor.priceMin, true);
+  targetView.setFloat32(FBUF_PRICE_MAX, descriptor.priceMax, true);
+  targetView.setFloat32(FBUF_CANVAS_W, descriptor.physW, true);
+  targetView.setFloat32(FBUF_CANVAS_H, descriptor.physH, true);
+  targetView.setFloat32(FBUF_CANDLE_W, descriptor.candleW, true);
+  targetView.setUint32(FBUF_FRAME_START_BAR, descriptor.frameStartBar, true);
+  targetView.setUint32(FBUF_VIEW_TIME_PTR, descriptor.timePtr, true);
+}
+
 async function ensureWasmInitialized() {
+  const modulePaths = _sharedWasmCapability?.enabled
+    ? [...WASM_MODULE_PATHS_SHARED, ...WASM_MODULE_PATHS]
+    : WASM_MODULE_PATHS;
+  const binaryPaths = _sharedWasmCapability?.enabled
+    ? [...WASM_BINARY_PATHS_SHARED, ...WASM_BINARY_PATHS]
+    : WASM_BINARY_PATHS;
+
   if (!WasmModule) {
     let loaded = null;
     let lastError = null;
-    for (let i = 0; i < WASM_MODULE_PATHS.length; i++) {
-      const candidate = new URL(WASM_MODULE_PATHS[i], import.meta.url).href;
+    for (let i = 0; i < modulePaths.length; i++) {
+      const candidate = new URL(modulePaths[i], import.meta.url).href;
       try {
         loaded = await import(candidate);
         break;
@@ -373,8 +450,8 @@ async function ensureWasmInitialized() {
   if (!_wasmInitPromise) {
     _wasmInitPromise = (async () => {
       let lastError = null;
-      for (let i = 0; i < WASM_BINARY_PATHS.length; i++) {
-        const candidate = new URL(WASM_BINARY_PATHS[i], import.meta.url).href;
+      for (let i = 0; i < binaryPaths.length; i++) {
+        const candidate = new URL(binaryPaths[i], import.meta.url).href;
         try {
           const response = await fetch(candidate);
           if (!response.ok) {
@@ -457,6 +534,18 @@ self.onmessage = async (evt) => {
     return;
   }
 
+  if (evt.data.type === 'set_ind_sab') {
+    if (!evt.data.indSab) return;
+    indSab = evt.data.indSab;
+    indHdrView = new DataView(indSab);
+    _indSabArenaCap = Math.max(0, ((indSab.byteLength - INDSAB_ARENA_OFF) / 4) | 0);
+    _pendingIndSabResize = 0;
+    _dstArena = null;
+    _dstArenaCap = 0;
+    _syncAnnStatsToRustAndSab();
+    return;
+  }
+
   if (evt.data.type === 'ann_add') {
     _applyAnnAdd(evt.data);
     return;
@@ -507,7 +596,7 @@ self.onmessage = async (evt) => {
       store = nextStore;
       totalBars = barCount;
       buildPlan(_sma1, _sma2, _sma3);
-      self.postMessage({ type: 'data_set', source: 'binary', bars: barCount });
+      self.postMessage({ type: 'data_set', source: 'binary', bars: barCount, arenaF32Count: plan.arena_len(), wasmMemory: _getSharedWasmBuffer() });
     } catch (err) {
       self.postMessage({ type: 'error', message: `set_data_binary failed: ${String(err)}` });
     }
@@ -522,7 +611,7 @@ self.onmessage = async (evt) => {
       store = nextStore;
       totalBars = barCount;
       buildPlan(_sma1, _sma2, _sma3);
-      self.postMessage({ type: 'data_set', source: 'soa', bars: barCount });
+      self.postMessage({ type: 'data_set', source: 'soa', bars: barCount, arenaF32Count: plan.arena_len(), wasmMemory: _getSharedWasmBuffer() });
     } catch (err) {
       self.postMessage({ type: 'error', message: `set_data_soa failed: ${String(err)}` });
     }
@@ -550,7 +639,7 @@ self.onmessage = async (evt) => {
       store = next.store;
       totalBars = next.barCount;
       buildPlan(_sma1, _sma2, _sma3);
-      self.postMessage({ type: 'data_set', source: 'url', bars: next.barCount });
+      self.postMessage({ type: 'data_set', source: 'url', bars: next.barCount, arenaF32Count: plan.arena_len(), wasmMemory: _getSharedWasmBuffer() });
     } catch (err) {
       self.postMessage({ type: 'error', message: `set_data_url failed: ${String(err)}` });
     }
@@ -629,7 +718,7 @@ self.onmessage = async (evt) => {
 
   if (evt.data.type !== 'init') return;
   if (_workerInitState === 2) {
-    if (totalBars > 0) self.postMessage({ type: 'ready', bars: totalBars });
+    if (totalBars > 0) self.postMessage({ type: 'ready', bars: totalBars, arenaF32Count: plan ? plan.arena_len() : 0, fdbBase: _fdbBase, wasmMemory: _getSharedWasmBuffer() });
     return;
   }
   if (_workerInitState === 1) return;
@@ -647,6 +736,7 @@ self.onmessage = async (evt) => {
   const frameCtrlBuf = descriptor.frameCtrl;
   const frameBuf = descriptor.frameBuf;
   const indSabBuf = descriptor.indSab;
+  _sharedWasmCapability = evt.data.sharedWasmCapability ?? null;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
     DPR = Math.ceil(evt.data.dpr);
@@ -665,6 +755,8 @@ self.onmessage = async (evt) => {
   indSab    = indSabBuf;
   fdbView   = new DataView(frameBuf, 0, FBUF_HDR_BYTES);
   indHdrView = new DataView(indSab);
+  _indSabArenaCap = Math.max(0, ((indSab.byteLength - INDSAB_ARENA_OFF) / 4) | 0);
+  _pendingIndSabResize = 0;
   _overlayRevision = 0;
 
   // Pre-allocate max-capacity destination views — created once, reused every frame.
@@ -678,6 +770,8 @@ self.onmessage = async (evt) => {
   try {
     // 1. Dynamically import and initialize WASM module (exactly once per worker)
     await ensureWasmInitialized();
+    _fdbBase = typeof WasmModule.fdb_ptr === 'function' ? (WasmModule.fdb_ptr() >>> 0) : 0;
+    console.log('[data_worker] sharedWasm scaffold |', _sharedWasmCapability?.enabled ? 'capable' : 'disabled', _sharedWasmCapability?.reason ?? 'ready');
 
     _useLegacyDefaultIndicators = evt.data.skipDefaultIndicators !== true;
     _baseIndicators = [];
@@ -712,7 +806,7 @@ self.onmessage = async (evt) => {
       'slots:', plan.slot_count(), '| revision:', plan.revision());
 
     // 4. Report ready
-    self.postMessage({ type: 'ready', bars: totalBars });
+    self.postMessage({ type: 'ready', bars: totalBars, arenaF32Count: plan.arena_len(), fdbBase: _fdbBase, wasmMemory: _getSharedWasmBuffer() });
 
     // 5. Begin data loop
     _workerInitState = 2;
@@ -790,12 +884,18 @@ async function dataLoop() {
     if (viewLen2 > 0) {
       _refreshWasmViews();
       // Source pointers are byte offsets; shift to f32/f64 element indices.
-      const oOff = store.view_open_ptr()   >> 2;
-      const hOff = store.view_high_ptr()   >> 2;
-      const lOff = store.view_low_ptr()    >> 2;
-      const cOff = store.view_close_ptr()  >> 2;
-      const vOff = store.view_volume_ptr() >> 2;
-      const tOff = store.view_time_ptr()   >> 3;  // f64 → /8
+      const openPtr = store.view_open_ptr() >>> 0;
+      const highPtr = store.view_high_ptr() >>> 0;
+      const lowPtr = store.view_low_ptr() >>> 0;
+      const closePtr = store.view_close_ptr() >>> 0;
+      const volPtr = store.view_volume_ptr() >>> 0;
+      const timePtr = store.view_time_ptr() >>> 0;
+      const oOff = openPtr >> 2;
+      const hOff = highPtr >> 2;
+      const lOff = lowPtr >> 2;
+      const cOff = closePtr >> 2;
+      const vOff = volPtr >> 2;
+      const tOff = timePtr >> 3;  // f64 → /8
       // .set(src) copies src.length elements into the pre-allocated dst.
       // subarray() returns a lightweight view (no data copy, ~64B object).
       _dstOpen .set(_wasmF32.subarray(oOff, oOff + viewLen2));
@@ -808,18 +908,28 @@ async function dataLoop() {
 
     // ── Write FDB header ───────────────────────────────────────────────
     frameSeq++;
-    fdbView.setUint32 (FBUF_START_BAR,  startBar,  true);
-    fdbView.setUint32 (FBUF_VIS_BARS,   visBars,   true);
-    fdbView.setUint32 (FBUF_VIEW_LEN,   viewLen2,  true);
-    fdbView.setUint32 (FBUF_FRAME_START_BAR, frameStartBar, true);
-    fdbView.setFloat32(FBUF_PRICE_MIN,  priceMin,  true);
-    fdbView.setFloat32(FBUF_PRICE_MAX,  priceMax,  true);
-    fdbView.setFloat32(FBUF_CANVAS_W,   physW,     true);
-    fdbView.setFloat32(FBUF_CANVAS_H,   physH,     true);
-    fdbView.setFloat32(FBUF_CANDLE_W,   candleW,   true);
-    fdbView.setUint32 (FBUF_FLAGS,      flags,     true);
-    fdbView.setUint32 (FBUF_SEQ,        frameSeq,  true);
-    fdbView.setUint32 (FBUF_TOTAL_BARS, totalBars, true);
+    _frameDescriptor.startBar = startBar;
+    _frameDescriptor.visBars = visBars;
+    _frameDescriptor.viewLen = viewLen2;
+    _frameDescriptor.flags = flags;
+    _frameDescriptor.openPtr = viewLen2 > 0 ? (store.view_open_ptr() >>> 0) : 0;
+    _frameDescriptor.highPtr = viewLen2 > 0 ? (store.view_high_ptr() >>> 0) : 0;
+    _frameDescriptor.lowPtr = viewLen2 > 0 ? (store.view_low_ptr() >>> 0) : 0;
+    _frameDescriptor.closePtr = viewLen2 > 0 ? (store.view_close_ptr() >>> 0) : 0;
+    _frameDescriptor.volPtr = viewLen2 > 0 ? (store.view_volume_ptr() >>> 0) : 0;
+    _frameDescriptor.timePtr = viewLen2 > 0 ? (store.view_time_ptr() >>> 0) : 0;
+    _frameDescriptor.frameSeq = frameSeq;
+    _frameDescriptor.totalBars = totalBars;
+    _frameDescriptor.priceMin = priceMin;
+    _frameDescriptor.priceMax = priceMax;
+    _frameDescriptor.physW = physW;
+    _frameDescriptor.physH = physH;
+    _frameDescriptor.candleW = candleW;
+    _frameDescriptor.frameStartBar = frameStartBar;
+    _writeFrameDescriptor(fdbView, _frameDescriptor);
+    if (_sharedFdbView) {
+      _writeFrameDescriptor(_sharedFdbView, _frameDescriptor);
+    }
 
     // ── Signal render_worker — frame is ready ─────────────────────────
     Atomics.store(frameCtrl, FCTRL_READY, frameSeq);
@@ -845,6 +955,15 @@ async function dataLoop() {
 function _writeIndSab(_visBars, revision) {
   const arenaLen = plan.arena_len();
   const cmdCount = plan.render_cmd_count();
+  if (arenaLen > _indSabArenaCap) {
+    if (arenaLen > _pendingIndSabResize) {
+      _pendingIndSabResize = arenaLen;
+      _indSabResizeMsg.slotId = workerSlotId;
+      _indSabResizeMsg.arenaF32Count = arenaLen;
+      self.postMessage(_indSabResizeMsg);
+    }
+    return;
+  }
 
   // Copy WASM arena → indSAB arena section
   // Reuse cached WASM F32 view (refreshed by _refreshWasmViews in dataLoop)

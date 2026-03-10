@@ -126,10 +126,13 @@ export const FBUF_START_BAR  =  0;  // u32 — first visible bar index
 export const FBUF_VIS_BARS   =  4;  // u32 — requested visible bar count
 export const FBUF_VIEW_LEN   =  8;  // u32 — actual decompressed bar count
 export const FBUF_FLAGS      = 12;  // u32 — indicator toggle flags
-// vec4<u32> #1 (bytes 16-31) — WASM view pointers (internal, not read by JS)
-// view_open_ptr=16, view_high_ptr=20, view_low_ptr=24, view_close_ptr=28
+// vec4<u32> #1 (bytes 16-31) — WASM view pointers
+export const FBUF_VIEW_OPEN_PTR  = 16;
+export const FBUF_VIEW_HIGH_PTR  = 20;
+export const FBUF_VIEW_LOW_PTR   = 24;
+export const FBUF_VIEW_CLOSE_PTR = 28;
 // vec4<u32> #2 (bytes 32-47)
-// view_vol_ptr=32
+export const FBUF_VIEW_VOL_PTR = 32;
 export const FBUF_SEQ        = 36;  // u32 — monotone frame counter
 export const FBUF_TOTAL_BARS = 40;  // u32 — store.len() (total ingested bars)
 // _pad0=44
@@ -147,7 +150,8 @@ export const FBUF_DIRTY_START = 76; // u32 — dirty range start bar
 export const FBUF_DIRTY_END      = 80;  // u32 — dirty range end bar
 export const FBUF_INDICATOR_GEN  = 84;  // u32 — indicator generation counter
 export const FBUF_FRAME_START_BAR = 88;  // u32 — actual first bar copied into frameBuf
-// bytes 92-127 reserved
+export const FBUF_VIEW_TIME_PTR   = 92;  // u32 — WASM linear memory offset of view_time[0]
+// bytes 96-127 reserved
 
 export const FBUF_HDR_BYTES = 128;
 

@@ -1,5 +1,9 @@
 /**
- * render_worker.js — P1 Render Worker (pure JavaScript, no WASM)
+ * render_worker.js — Legacy split-path render worker (pure JavaScript, no WASM)
+ *
+ * Compatibility note:
+ *   This file remains only for the old data_worker/render_worker split pipeline.
+ *   The crate demo's primary runtime path is unified_worker.js.
  *
  * Receives SoA + FDB frame data from data_worker via SharedArrayBuffer (frameBuf).
  * Renders candles + SMA indicators via WebGPU, draws HUD via Canvas 2D.
@@ -23,6 +27,7 @@ import {
   FRAME_MAX_BARS,
   FBUF_HDR_BYTES,
   FBUF_VIEW_LEN, FBUF_VIS_BARS, FBUF_START_BAR, FBUF_FRAME_START_BAR,
+  FBUF_VIEW_OPEN_PTR, FBUF_VIEW_HIGH_PTR, FBUF_VIEW_LOW_PTR, FBUF_VIEW_CLOSE_PTR, FBUF_VIEW_VOL_PTR, FBUF_VIEW_TIME_PTR,
   FBUF_CANVAS_W, FBUF_CANVAS_H,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX, FBUF_FLAGS,
   FBUF_TIME_OFF, FBUF_OPEN_OFF, FBUF_HIGH_OFF, FBUF_LOW_OFF, FBUF_CLOSE_OFF, FBUF_VOL_OFF,
@@ -33,6 +38,8 @@ import {
   INDSAB_ARENA_OFF,
   INDSAB_OVERLAY_STD430_OFF, INDSAB_OVERLAY_STD430_WORDS, INDSAB_OVERLAY_REV_OFF,
 } from './shared_protocol.js';
+
+const _gpuViewportShift = { panOffsetPx: 0, extraLeftBars: 0, rightMarginBars: 0 };
 
 // DPR is set from the main thread's init message (self.devicePixelRatio is
 // unreliable in Workers — may be undefined or 1 depending on browser version).
@@ -107,6 +114,16 @@ function isoDateStr(ms) {
 /** @type {SharedArrayBuffer} */                   let frameBuf;
 /** @type {DataView} */                            let fdbHdr;
 /** @type {GpuRenderer} */                         let gpuRenderer;
+/** @type {{enabled?: boolean, reason?: string | null} | null} */ let _sharedWasmCapability = null;
+/** @type {number} */ let _sharedWasmFdbBase = 0;
+/** @type {SharedArrayBuffer|null} */ let _sharedWasmMemory = null;
+/** @type {number} */ let _sharedOpenPtr = -1;
+/** @type {number} */ let _sharedHighPtr = -1;
+/** @type {number} */ let _sharedLowPtr = -1;
+/** @type {number} */ let _sharedClosePtr = -1;
+/** @type {number} */ let _sharedVolPtr = -1;
+/** @type {number} */ let _sharedTimePtr = -1;
+/** @type {number} */ let _sharedViewCap = 0;
 
 // ── Pre-allocated SoA views on frameBuf (FRAME_MAX_BARS capacity) ─────────
 // Created once at init; used for tooltip OHLCV reads and date axis.
@@ -117,6 +134,53 @@ function isoDateStr(ms) {
 /** @type {Float32Array} */ let _fbClose;
 /** @type {Float32Array} */ let _fbVol;
 /** @type {Float64Array} */ let _fbTime;
+
+function _syncGpuRendererFrameViews() {
+  if (!gpuRenderer) return;
+  gpuRenderer.setFrameViews(_fbOpen, _fbHigh, _fbLow, _fbClose, _fbVol);
+}
+
+function _refreshSharedFrameViews(viewLen) {
+  if (!_sharedWasmMemory || !fdbHdr) return false;
+  const openPtr = fdbHdr.getUint32(FBUF_VIEW_OPEN_PTR, true);
+  const highPtr = fdbHdr.getUint32(FBUF_VIEW_HIGH_PTR, true);
+  const lowPtr = fdbHdr.getUint32(FBUF_VIEW_LOW_PTR, true);
+  const closePtr = fdbHdr.getUint32(FBUF_VIEW_CLOSE_PTR, true);
+  const volPtr = fdbHdr.getUint32(FBUF_VIEW_VOL_PTR, true);
+  const timePtr = fdbHdr.getUint32(FBUF_VIEW_TIME_PTR, true);
+  const requiredCap = Math.max(1, viewLen);
+  const changed = _fbOpen == null
+    || openPtr !== _sharedOpenPtr
+    || highPtr !== _sharedHighPtr
+    || lowPtr !== _sharedLowPtr
+    || closePtr !== _sharedClosePtr
+    || volPtr !== _sharedVolPtr
+    || timePtr !== _sharedTimePtr
+    || requiredCap > _sharedViewCap;
+  if (!changed) return true;
+  if (openPtr === 0 || highPtr === 0 || lowPtr === 0 || closePtr === 0 || volPtr === 0 || timePtr === 0) return false;
+  _sharedOpenPtr = openPtr;
+  _sharedHighPtr = highPtr;
+  _sharedLowPtr = lowPtr;
+  _sharedClosePtr = closePtr;
+  _sharedVolPtr = volPtr;
+  _sharedTimePtr = timePtr;
+  _sharedViewCap = requiredCap;
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbOpen = new Float32Array(_sharedWasmMemory, openPtr, requiredCap);
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbHigh = new Float32Array(_sharedWasmMemory, highPtr, requiredCap);
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbLow = new Float32Array(_sharedWasmMemory, lowPtr, requiredCap);
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbClose = new Float32Array(_sharedWasmMemory, closePtr, requiredCap);
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbVol = new Float32Array(_sharedWasmMemory, volPtr, requiredCap);
+  // @zero_alloc_allow: Rebind shared WASM views only when source pointers change or capacity grows.
+  _fbTime = new Float64Array(_sharedWasmMemory, timePtr, requiredCap);
+  _syncGpuRendererFrameViews();
+  return true;
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 // Reusable object to avoid garbage collection on pointer hover
@@ -195,7 +259,35 @@ function _readOverlaySummary() {
 }
 
 self.onmessage = async (evt) => {
-  if (evt.data.type === 'update_sma_periods') {
+    if (evt.data.type === 'set_shared_wasm_memory') {
+      const nextWasmMemory = evt.data.wasmMemory;
+      const nextFdbBase = Math.max(0, (evt.data.fdbBase | 0) >>> 0);
+      if (!(nextWasmMemory instanceof SharedArrayBuffer) || nextFdbBase === 0) return;
+      _sharedWasmMemory = nextWasmMemory;
+      _sharedWasmFdbBase = nextFdbBase;
+      fdbHdr = new DataView(nextWasmMemory, nextFdbBase, FBUF_HDR_BYTES);
+      _sharedOpenPtr = -1;
+      _sharedHighPtr = -1;
+      _sharedLowPtr = -1;
+      _sharedClosePtr = -1;
+      _sharedVolPtr = -1;
+      _sharedTimePtr = -1;
+      _sharedViewCap = 0;
+      return;
+    }
+    if (evt.data.type === 'set_ind_sab') {
+      const nextIndSab = evt.data.indSab;
+      if (!nextIndSab || !gpuRenderer) return;
+      gpuRenderer.setIndSab(nextIndSab);
+      _indSabRef = nextIndSab;
+      _indSabHdr = new DataView(nextIndSab);
+      _indArenaView = null;
+      _indArenaViewLen = 0;
+      _smaCachedRevision = -1;
+      _overlayRevSeen = -1;
+      return;
+    }
+    if (evt.data.type === 'update_sma_periods') {
       smaPeriods.sma1 = evt.data.sma1;
       smaPeriods.sma2 = evt.data.sma2;
       smaPeriods.sma3 = evt.data.sma3;
@@ -222,6 +314,8 @@ self.onmessage = async (evt) => {
     frameCtrl: evt.data.frameCtrl,
     frameBuf: evt.data.frameBuf,
     indSab: evt.data.indSab,
+    wasmMemory: null,
+    fdbBase: 0,
   };
   const { gpuCanvas: gc, hudCanvas: hc } = evt.data;
   workerSlotId = ((descriptor.slotId | 0) >>> 0);
@@ -229,16 +323,21 @@ self.onmessage = async (evt) => {
   const frcBuf = descriptor.frameCtrl;
   const fsBuf = descriptor.frameBuf;
   const indSab = descriptor.indSab;
+  _sharedWasmCapability = evt.data.sharedWasmCapability ?? null;
+  _sharedWasmFdbBase = Math.max(0, (descriptor.fdbBase | 0) >>> 0);
+  _sharedWasmMemory = descriptor.wasmMemory instanceof SharedArrayBuffer ? descriptor.wasmMemory : null;
   // Use authoritative DPR from main thread
   if (typeof evt.data.dpr === 'number' && evt.data.dpr >= 1) {
     DPR = Math.round(evt.data.dpr);
   }
-  console.log('[render_worker] DPR:', DPR, 'slot:', workerSlotId);
+  console.log('[render_worker] DPR:', DPR, 'slot:', workerSlotId, 'sharedWasm:', _sharedWasmCapability?.enabled ? 'capable' : 'disabled', 'fdbBase:', _sharedWasmFdbBase);
   gpuCanvas  = gc; hudCanvas = hc;
   ctrl       = new Int32Array(ctrlBuf);
   frameCtrl  = new Int32Array(frcBuf);
   frameBuf   = fsBuf;
-  fdbHdr     = new DataView(fsBuf, 0, FBUF_HDR_BYTES);
+  fdbHdr     = _sharedWasmMemory && _sharedWasmFdbBase > 0
+    ? new DataView(_sharedWasmMemory, _sharedWasmFdbBase, FBUF_HDR_BYTES)
+    : new DataView(fsBuf, 0, FBUF_HDR_BYTES);
 
   // Pre-allocate max-capacity SoA views on frameBuf (created once, used every hover/frame)
   _fbOpen  = new Float32Array(fsBuf, FBUF_OPEN_OFF,  FRAME_MAX_BARS);
@@ -253,7 +352,8 @@ self.onmessage = async (evt) => {
     gpuRenderer.dpr = DPR;
     const { format } = await gpuRenderer.init(gpuCanvas);
     // Pre-allocate SoA views on frameBuf for zero-alloc GPU upload
-    gpuRenderer.setFrameBufViews(fsBuf);
+    gpuRenderer.setLegacyFrameBufViews(fsBuf);
+    _syncGpuRendererFrameViews();
     // Wire up EP indicator arena if data_worker provides one
     if (indSab) {
       gpuRenderer.setIndSab(indSab);
@@ -294,6 +394,9 @@ function renderLoop() {
     const physW   = fdbHdr.getFloat32(FBUF_CANVAS_W, true);
     const physH   = fdbHdr.getFloat32(FBUF_CANVAS_H, true);
     const flags   = fdbHdr.getUint32 (FBUF_FLAGS,    true);
+    if (_sharedWasmMemory) {
+      _refreshSharedFrameViews(viewLen);
+    }
 
     const ci = workerSlotId;
     const dirtyBits = Atomics.load(ctrl, ci * STRIDE + DIRTY);
@@ -324,11 +427,10 @@ function renderLoop() {
         const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
         const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
         // @zero_alloc_allow: drawGpu internals are audited separately; keep renderFrame gate focused on worker-frame allocations.
-        const [pMin, pMax] = gpuRenderer.drawGpu(frameBuf, fdbHdr, viewLen, {
-          panOffsetPx,
-          extraLeftBars: Math.max(0, fdbHdr.getUint32(FBUF_START_BAR, true) - frameStartBar),
-          rightMarginBars: Math.max(0, Atomics.load(ctrl, ci * STRIDE + RIGHT_MARGIN_BARS)),
-        });
+        _gpuViewportShift.panOffsetPx = panOffsetPx;
+        _gpuViewportShift.extraLeftBars = Math.max(0, fdbHdr.getUint32(FBUF_START_BAR, true) - frameStartBar);
+        _gpuViewportShift.rightMarginBars = Math.max(0, Atomics.load(ctrl, ci * STRIDE + RIGHT_MARGIN_BARS));
+        const [pMin, pMax] = gpuRenderer.drawGpu(fdbHdr, viewLen, _gpuViewportShift);
         _r64[R_CACHED_PMIN] = pMin;
         _r64[R_CACHED_PMAX] = pMax;
         if (firstFrame) {
