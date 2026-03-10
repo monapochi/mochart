@@ -6,7 +6,7 @@
  * the LP can run through createChart() just like an external consumer.
  */
 
-const LP_BUILD_VERSION = '20260310d';
+const LP_BUILD_VERSION = '20260310e';
 const PERF_INTERVAL_MS = 250;
 const DEFAULT_VISIBLE_BARS = 200;
 const DEFAULT_PANES = { gap: 2, weights: [7, 1.5, 1.5] };
@@ -33,6 +33,10 @@ async function loadMochartModule() {
     }
   }
   throw lastError ?? new Error('Failed to load Mochart public bundle');
+}
+
+function resolveLpRenderWorkerUrl() {
+  return new URL('../lib/renderer/worker/renderWorker.js', import.meta.url).href;
 }
 
 function createIndicatorConfigs(Mochart) {
@@ -116,6 +120,7 @@ async function init() {
 
   const chart = Mochart.createChart(chartRoot, {
     renderer: 'canvas-worker',
+    workerUrl: resolveLpRenderWorkerUrl(),
     dataUrl: new URL('../MSFT.bin', import.meta.url).href,
     dpr: resolvedDpr,
     visibleBars: DEFAULT_VISIBLE_BARS,
@@ -161,7 +166,6 @@ async function init() {
 
   console.log('[lp_host] ready via public createChart()', { build: LP_BUILD_VERSION });
 }
-
 
 init().catch((error) => {
   console.error('[lp_host] init failed:', error);
