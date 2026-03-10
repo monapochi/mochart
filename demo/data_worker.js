@@ -784,7 +784,7 @@ async function dataLoop() {
       _writeIndSab(visBars, plan.revision());
     }
 
-    const viewLen2 = viewLen;
+    const viewLen2 = Math.min(viewLen, FRAME_MAX_BARS);
 
     // ── Copy SoA to frameBuf (zero-alloc destination, cached WASM views) ────
     if (viewLen2 > 0) {
