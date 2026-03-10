@@ -1021,8 +1021,9 @@ export class GpuRenderer {
       } else {
         const seg = barCount - warmup - 1;
         if (seg < 1) continue;
+        const DPR = this.dpr || 1.0;
         this._packThickLineUni(dv, plotW, paneH, candleW, yMin, yMax,
-          arenaOff, barCount, warmup, lineW, cr, cg, cb, ca, visBc, offsetSlots);
+          arenaOff, barCount, warmup, lineW * DPR, cr, cg, cb, ca, visBc, offsetSlots);
         pipeline = this.indLinePipeline; uniSize = 64; drawCount = seg * 6;
       }
 
