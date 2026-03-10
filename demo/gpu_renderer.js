@@ -571,9 +571,10 @@ export class GpuRenderer {
     // ── 6. Indicator overlays ────────────────────────────────────────────────
     if (this.indSab) {
       // EP pipeline: arena-driven draw loop (replaces legacy per-SMA calls).
-      this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, visBc, offsetSlots);
+      // Pass totalSlots (not visBc) so indicators share the same slot width as candles.
+      this._drawIndicatorCmds(plotW, candleW, paddedMin, paddedMax, paneLayout, flags, totalSlots, offsetSlots);
     } else if (this._hasLegacySmaFrameChannels) {
-      this._drawLegacySmaOverlays(flags, viewLen, startBar, plotW, mainH, candleW, paddedMin, paddedMax, DPR, visBc);
+      this._drawLegacySmaOverlays(flags, viewLen, startBar, plotW, mainH, candleW, paddedMin, paddedMax, DPR, totalSlots);
     }
 
     // ── 7. Volume Profile Heatmap ─────────────────────────────────────────
