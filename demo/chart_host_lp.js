@@ -1,173 +1,390 @@
 /**
- * chart_host_lp.js — Landing Page chart host through the public Mochart API.
+ * chart_host_lp.js — Landing Page chart host (WebGPU native path)
  *
- * This file intentionally does not talk to demo workers directly.
- * It loads the npm-like library bundle copied into docs/lib/ and validates that
- * the LP can run through createChart() just like an external consumer.
+ * Uses unified_worker.js + GpuRenderer for native WebGPU rendering.
+ * Communicates with the Worker via SharedArrayBuffer + Atomics (same as chart_host.ts).
+ * Stripped-down version of UnifiedDemoHost for the minimal LP hero section.
  */
 
-const LP_BUILD_VERSION = '20260310e';
+import {
+  allocCtrlBuf,
+  allocIndSab,
+  AT_RIGHT_EDGE,
+  DIRTY,
+  FLAGS,
+  GPU_DIRTY,
+  HUD_DIRTY,
+  PLOT_H,
+  PLOT_W,
+  POINTER_X,
+  POINTER_Y,
+  READY,
+  RIGHT_MARGIN_BARS,
+  START_BAR,
+  STRIDE,
+  SUBPIXEL_PAN_X,
+  VIS_BARS,
+  WAKE,
+  f32ToI32,
+  i32ToF32,
+} from './shared_protocol.js';
+
+const LP_BUILD_VERSION = '20260310f';
 const PERF_INTERVAL_MS = 250;
 const DEFAULT_VISIBLE_BARS = 200;
-const DEFAULT_PANES = { gap: 2, weights: [7, 1.5, 1.5] };
+const RIGHT_MARGIN_RATIO = 0.1;
+const MIN_VISIBLE_BARS = 20;
 const MAX_DISPLAY_FPS = 120;
-const COLOR_SMA_1 = [0.121, 0.466, 0.705, 1.0];
-const COLOR_SMA_2 = [1.0, 0.498, 0.054, 1.0];
-const COLOR_SMA_3 = [0.173, 0.627, 0.173, 1.0];
-const COLOR_RSI = [0.58, 0.2, 0.89, 1.0];
-const COLOR_MACD = [0.98, 0.75, 0.18, 1.0];
-const COLOR_VOLUME = [0.45, 0.68, 0.94, 0.72];
+const PANE_CONFIG = { gap: 2, weights: [7, 1.5, 1.5] };
 
-async function loadMochartModule() {
-  const candidates = [
-    new URL('../lib/index.js', import.meta.url).href,
-    new URL('../../dist/index.js', import.meta.url).href,
-  ];
+// Indicator flags: sma1=1 | sma2=2 | sma3=4 | rsi=32 | macd=64 | volume=128
+const LP_INDICATOR_FLAGS = 1 | 2 | 4 | 32 | 64 | 128;
 
-  let lastError = null;
-  for (let i = 0; i < candidates.length; i++) {
-    try {
-      return await import(candidates[i]);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError ?? new Error('Failed to load Mochart public bundle');
+function createCanvas(id) {
+  const canvas = document.createElement('canvas');
+  canvas.id = id;
+  canvas.style.position = 'absolute';
+  canvas.style.inset = '0';
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+  canvas.style.display = 'block';
+  canvas.width = 1;
+  canvas.height = 1;
+  return canvas;
 }
 
-function resolveLpRenderWorkerUrl() {
-  return new URL('../lib/renderer/worker/renderWorker.js', import.meta.url).href;
-}
+class LpDemoHost {
+  constructor(container) {
+    this.container = container;
+    this.slotId = 0;
+    this.destroyed = false;
+    this.ready = false;
+    this.totalBars = 0;
+    this.visibleBars = DEFAULT_VISIBLE_BARS;
+    this.rawStartBar = 0;
+    this.atRightEdge = true;
+    this.plotW = 0;
+    this.plotH = 0;
+    this.pointerX = -1;
+    this.pointerY = -1;
+    this.pendingGpuDirty = true;
+    this.pendingHudDirty = true;
+    this.dragPointerId = -1;
+    this.dragOriginX = 0;
+    this.dragOriginStartBar = 0;
+    this.perf = {};
+    this.gpuFormat = '';
 
-function createIndicatorConfigs(Mochart) {
-  return [
-    {
-      kind: Mochart.IndicatorKind.SMA,
-      period: 5,
-      pane: 'main',
-      style: Mochart.RenderStyle.ThickLine,
-      color: COLOR_SMA_1,
-      lineWidth: 1.75,
-      enabled: true,
-    },
-    {
-      kind: Mochart.IndicatorKind.SMA,
-      period: 25,
-      pane: 'main',
-      style: Mochart.RenderStyle.ThickLine,
-      color: COLOR_SMA_2,
-      lineWidth: 1.75,
-      enabled: true,
-    },
-    {
-      kind: Mochart.IndicatorKind.SMA,
-      period: 75,
-      pane: 'main',
-      style: Mochart.RenderStyle.ThickLine,
-      color: COLOR_SMA_3,
-      lineWidth: 1.75,
-      enabled: true,
-    },
-    {
-      kind: Mochart.IndicatorKind.RSI,
-      period: 14,
-      pane: 'sub1',
-      style: Mochart.RenderStyle.ThickLine,
-      color: COLOR_RSI,
-      lineWidth: 1.5,
-      enabled: true,
-    },
-    {
-      kind: Mochart.IndicatorKind.MACD,
-      period: 12,
-      slow: 26,
-      signal: 9,
-      pane: 'sub1',
-      style: Mochart.RenderStyle.ThickLine,
-      color: COLOR_MACD,
-      lineWidth: 1.5,
-      enabled: true,
-    },
-    {
-      kind: Mochart.IndicatorKind.Volume,
-      period: 1,
-      pane: 'sub2',
-      style: Mochart.RenderStyle.Histogram,
-      color: COLOR_VOLUME,
-      lineWidth: 1.0,
-      enabled: true,
-    },
-  ];
-}
+    // Previous state for dirty detection
+    this.prevStartBar = NaN;
+    this.prevVisibleBars = NaN;
+    this.prevPlotW = NaN;
+    this.prevPlotH = NaN;
+    this.prevPointerX = NaN;
+    this.prevPointerY = NaN;
+    this.prevFlags = NaN;
+    this.prevPanOffsetPx = NaN;
+    this.prevRightMarginBars = NaN;
 
-async function init() {
-  window._lpOnProgress?.(20, 'Loading Mochart public bundle…');
+    // Create GPU + HUD canvases
+    this.gpuCanvas = createCanvas('lp-chart-gpu');
+    this.hudCanvas = createCanvas('lp-chart-hud');
+    container.appendChild(this.gpuCanvas);
+    container.appendChild(this.hudCanvas);
 
-  const hero = document.getElementById('hero');
-  if (!(hero instanceof HTMLElement)) {
-    throw new Error('hero container not found');
+    // Allocate shared memory
+    this.ctrlBuffer = allocCtrlBuf(1);
+    this.ctrl = new Int32Array(this.ctrlBuffer);
+    this.indSab = allocIndSab();
+
+    this.ctrl[this.slotId * STRIDE + POINTER_X] = f32ToI32(-1);
+    this.ctrl[this.slotId * STRIDE + POINTER_Y] = f32ToI32(-1);
+
+    // Launch unified worker
+    this.worker = new Worker(new URL('./unified_worker.js', import.meta.url), { type: 'module' });
+    this._bindWorker();
+    this._bindViewport();
+    this._measureContainer();
+    this._startWorker();
+    this._postPaneConfig();
+    this._scheduleWake(true, true);
+
+    this.perfTimer = window.setInterval(() => this._reportPerf(), PERF_INTERVAL_MS);
   }
 
-  const chartRoot = document.getElementById('chart-host');
-  if (!(chartRoot instanceof HTMLElement)) {
-    throw new Error('chart host not found');
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    if (this.resizeObserver) this.resizeObserver.disconnect();
+    window.clearInterval(this.perfTimer);
+    this.worker.terminate();
   }
 
-  const Mochart = await loadMochartModule();
-  window._lpOnProgress?.(45, 'Starting worker-backed chart…');
-
-  const resolvedDpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
-
-  const chart = Mochart.createChart(chartRoot, {
-    renderer: 'canvas-worker',
-    workerUrl: resolveLpRenderWorkerUrl(),
-    dataUrl: new URL('../MSFT.bin', import.meta.url).href,
-    dpr: resolvedDpr,
-    visibleBars: DEFAULT_VISIBLE_BARS,
-    rightMarginRatio: 0.12,
-    panes: DEFAULT_PANES,
-  });
-
-  const indicatorConfigs = createIndicatorConfigs(Mochart);
-  for (let i = 0; i < indicatorConfigs.length; i++) {
-    chart.addIndicator(indicatorConfigs[i]);
-  }
-
-  chart.setPaneConfig(DEFAULT_PANES);
-  window._lpOnProgress?.(70, 'Fetching binary OHLCV and warming workers…');
-
-  let ready = false;
-  chart.on('viewportChange', (event) => {
-    if (ready || event.totalBars < 1) return;
-    ready = true;
-    window._lpOnReady?.(event.totalBars);
-  });
-
-  const perfTimer = window.setInterval(() => {
-    const perf = chart.getPerformanceMetrics();
-    if (perf?.frame?.ewma && perf.frame.ewma > 0) {
-      window._lpOnPerf?.(Math.min(MAX_DISPLAY_FPS, 1000 / perf.frame.ewma), perf.frame.ewma);
-    }
-
-    if (!ready) {
-      const range = chart.getVisibleRangeView();
-      const totalBars = range[2];
-      if (totalBars > 0) {
-        ready = true;
-        window._lpOnReady?.(totalBars);
+  _bindWorker() {
+    this.worker.addEventListener('message', (event) => {
+      if (this.destroyed) return;
+      const msg = event.data;
+      if (msg?.type === 'ready') {
+        this.ready = true;
+        this.totalBars = Math.max(0, msg.bars | 0);
+        this.gpuFormat = typeof msg.format === 'string' ? msg.format : this.gpuFormat;
+        this._clampViewport();
+        this._postSmaPeriods();
+        this._postPaneConfig();
+        this._scheduleWake(true, true);
+        window._lpOnReady?.(this.totalBars);
+        return;
       }
+      if (msg?.type === 'data_set') {
+        this.totalBars = Math.max(0, msg.bars | 0);
+        this._clampViewport();
+        this._scheduleWake(true, true);
+        if (!this.ready) {
+          this.ready = true;
+          window._lpOnReady?.(this.totalBars);
+        }
+        return;
+      }
+      if (msg?.type === 'ind_sab_resize') {
+        this.indSab = allocIndSab(msg.arenaF32Count);
+        this.worker.postMessage({ type: 'set_ind_sab', slotId: this.slotId, indSab: this.indSab });
+        this._scheduleWake(true, true);
+        return;
+      }
+      if (msg?.type === 'perf') {
+        this.perf = {
+          wasm: msg.wasm,
+          gpu: msg.gpu,
+          hud: msg.hud,
+          frame: msg.frame,
+        };
+        return;
+      }
+      if (msg?.type === 'error') {
+        console.error('[lp_host] worker error:', msg.message);
+      }
+    });
+  }
+
+  _startWorker() {
+    const gpuOffscreen = this.gpuCanvas.transferControlToOffscreen();
+    const hudOffscreen = this.hudCanvas.transferControlToOffscreen();
+    this.worker.postMessage({
+      type: 'init',
+      descriptor: { slotId: this.slotId, ctrl: this.ctrlBuffer, indSab: this.indSab },
+      indSab: this.indSab,
+      gpuCanvas: gpuOffscreen,
+      hudCanvas: hudOffscreen,
+      dpr: window.devicePixelRatio || 1,
+    }, [gpuOffscreen, hudOffscreen]);
+  }
+
+  _bindViewport() {
+    this.resizeObserver = new ResizeObserver(() => {
+      this._measureContainer();
+      this._scheduleWake(true, true);
+    });
+    this.resizeObserver.observe(this.container);
+
+    this.hudCanvas.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const pt = this._localPoint(e);
+      this.dragPointerId = e.pointerId;
+      this.dragOriginX = pt.x;
+      this.dragOriginStartBar = this.rawStartBar;
+      this.pointerX = pt.x;
+      this.pointerY = pt.y;
+      this.hudCanvas.setPointerCapture(e.pointerId);
+      this._scheduleWake(false, true);
+    });
+
+    this.hudCanvas.addEventListener('pointermove', (e) => {
+      const pt = this._localPoint(e);
+      this.pointerX = pt.x;
+      this.pointerY = pt.y;
+      if (this.dragPointerId === e.pointerId) {
+        const slotW = this._slotWidth();
+        const deltaBars = (pt.x - this.dragOriginX) / Math.max(1e-6, slotW);
+        this.rawStartBar = this.dragOriginStartBar - deltaBars;
+        this._clampViewport();
+        this._scheduleWake(true, true);
+        return;
+      }
+      this._scheduleWake(false, true);
+    });
+
+    const stopDrag = (e) => {
+      if (this.dragPointerId !== e.pointerId) return;
+      this.dragPointerId = -1;
+      if (this.hudCanvas.hasPointerCapture(e.pointerId)) {
+        this.hudCanvas.releasePointerCapture(e.pointerId);
+      }
+    };
+    this.hudCanvas.addEventListener('pointerup', stopDrag);
+    this.hudCanvas.addEventListener('pointercancel', stopDrag);
+    this.hudCanvas.addEventListener('pointerleave', () => {
+      this.pointerX = -1;
+      this.pointerY = -1;
+      this._scheduleWake(false, true);
+    });
+
+    this.hudCanvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const pt = this._localPoint(e);
+      const cur = this.visibleBars;
+      const next = Math.max(
+        MIN_VISIBLE_BARS,
+        Math.min(
+          Math.max(MIN_VISIBLE_BARS, this.totalBars || cur || DEFAULT_VISIBLE_BARS),
+          Math.round(cur * Math.exp(e.deltaY * 0.0015)),
+        ),
+      );
+      if (next === cur) return;
+      const chartW = Math.max(1, this.plotW - 60);
+      const oldRM = this.atRightEdge ? Math.max(0, Math.round(cur * RIGHT_MARGIN_RATIO)) : 0;
+      const oldStep = chartW / Math.max(1, cur + oldRM);
+      const anchor = this.rawStartBar + pt.x / Math.max(1e-6, oldStep);
+      const nextRM = this.atRightEdge ? Math.max(0, Math.round(next * RIGHT_MARGIN_RATIO)) : 0;
+      const nextStep = chartW / Math.max(1, next + nextRM);
+      this.visibleBars = next;
+      this.rawStartBar = anchor - pt.x / Math.max(1e-6, nextStep);
+      this._clampViewport();
+      this.pointerX = pt.x;
+      this.pointerY = pt.y;
+      this._scheduleWake(true, true);
+    }, { passive: false });
+  }
+
+  _postPaneConfig() {
+    this.worker.postMessage({
+      type: 'pane_config',
+      slotId: this.slotId,
+      gap: PANE_CONFIG.gap,
+      weights: PANE_CONFIG.weights,
+    });
+  }
+
+  _postSmaPeriods() {
+    this.worker.postMessage({
+      type: 'update_sma_periods',
+      slotId: this.slotId,
+      sma1: 5,
+      sma2: 25,
+      sma3: 75,
+    });
+  }
+
+  _measureContainer() {
+    const rect = this.container.getBoundingClientRect();
+    this.plotW = Math.max(1, Math.round(rect.width));
+    this.plotH = Math.max(1, Math.round(rect.height));
+  }
+
+  _localPoint(e) {
+    const rect = this.hudCanvas.getBoundingClientRect();
+    return {
+      x: Math.min(Math.max(0, e.clientX - rect.left), Math.max(0, rect.width - 1)),
+      y: Math.min(Math.max(0, e.clientY - rect.top), Math.max(0, rect.height - 1)),
+    };
+  }
+
+  _slotWidth() {
+    const chartW = Math.max(1, this.plotW - 60);
+    const rm = this.atRightEdge ? Math.max(0, Math.round(this.visibleBars * RIGHT_MARGIN_RATIO)) : 0;
+    return chartW / Math.max(1, this.visibleBars + rm);
+  }
+
+  _clampViewport() {
+    const maxVis = Math.max(MIN_VISIBLE_BARS, this.totalBars || DEFAULT_VISIBLE_BARS);
+    this.visibleBars = Math.max(MIN_VISIBLE_BARS, Math.min(this.visibleBars | 0, maxVis));
+    const maxStart = Math.max(0, this.totalBars - this.visibleBars);
+    if (!Number.isFinite(this.rawStartBar)) this.rawStartBar = maxStart;
+    if (this.rawStartBar < 0) this.rawStartBar = 0;
+    if (this.rawStartBar > maxStart) this.rawStartBar = maxStart;
+    this.atRightEdge = this.totalBars <= this.visibleBars || this.rawStartBar >= maxStart - 1e-6;
+    if (this.atRightEdge) this.rawStartBar = maxStart;
+  }
+
+  _scheduleWake(gpuDirty, hudDirty) {
+    if (this.destroyed) return;
+    this.pendingGpuDirty = this.pendingGpuDirty || gpuDirty;
+    this.pendingHudDirty = this.pendingHudDirty || hudDirty;
+    this._publishCtrl();
+  }
+
+  _publishCtrl() {
+    if (this.destroyed) return;
+    this._clampViewport();
+    const rm = this.atRightEdge ? Math.max(0, Math.round(this.visibleBars * RIGHT_MARGIN_RATIO)) : 0;
+    const startBar = Math.floor(this.rawStartBar);
+    const remainder = this.rawStartBar - startBar;
+    const panPx = remainder * this._slotWidth();
+    const flags = LP_INDICATOR_FLAGS | (this.atRightEdge ? AT_RIGHT_EDGE : 0);
+
+    const nextGpu = this.pendingGpuDirty
+      || startBar !== this.prevStartBar
+      || this.visibleBars !== this.prevVisibleBars
+      || this.plotW !== this.prevPlotW
+      || this.plotH !== this.prevPlotH
+      || flags !== this.prevFlags
+      || panPx !== this.prevPanOffsetPx
+      || rm !== this.prevRightMarginBars;
+    const nextHud = this.pendingHudDirty || nextGpu
+      || this.pointerX !== this.prevPointerX
+      || this.pointerY !== this.prevPointerY;
+
+    this.pendingGpuDirty = false;
+    this.pendingHudDirty = false;
+    if (!nextGpu && !nextHud) return;
+
+    const base = this.slotId * STRIDE;
+    Atomics.store(this.ctrl, base + START_BAR, startBar);
+    Atomics.store(this.ctrl, base + VIS_BARS, this.visibleBars);
+    Atomics.store(this.ctrl, base + PLOT_W, f32ToI32(this.plotW));
+    Atomics.store(this.ctrl, base + PLOT_H, f32ToI32(this.plotH));
+    Atomics.store(this.ctrl, base + POINTER_X, f32ToI32(this.pointerX));
+    Atomics.store(this.ctrl, base + POINTER_Y, f32ToI32(this.pointerY));
+    Atomics.store(this.ctrl, base + FLAGS, flags);
+    Atomics.store(this.ctrl, base + SUBPIXEL_PAN_X, f32ToI32(panPx));
+    Atomics.store(this.ctrl, base + RIGHT_MARGIN_BARS, rm);
+    Atomics.store(this.ctrl, base + DIRTY, (nextGpu ? (GPU_DIRTY | HUD_DIRTY) : 0) | (nextHud ? HUD_DIRTY : 0));
+    const wake = (Atomics.load(this.ctrl, base + WAKE) + 1) | 0;
+    Atomics.store(this.ctrl, base + WAKE, wake);
+    Atomics.notify(this.ctrl, base + WAKE);
+
+    this.prevStartBar = startBar;
+    this.prevVisibleBars = this.visibleBars;
+    this.prevPlotW = this.plotW;
+    this.prevPlotH = this.plotH;
+    this.prevPointerX = this.pointerX;
+    this.prevPointerY = this.pointerY;
+    this.prevFlags = flags;
+    this.prevPanOffsetPx = panPx;
+    this.prevRightMarginBars = rm;
+  }
+
+  _reportPerf() {
+    if (this.perf?.frame?.ewma && this.perf.frame.ewma > 0) {
+      window._lpOnPerf?.(Math.min(MAX_DISPLAY_FPS, 1000 / this.perf.frame.ewma), this.perf.frame.ewma);
     }
-  }, PERF_INTERVAL_MS);
-
-  window.addEventListener('beforeunload', () => {
-    window.clearInterval(perfTimer);
-    chart.destroy();
-  }, { once: true });
-
-  console.log('[lp_host] ready via public createChart()', { build: LP_BUILD_VERSION });
+  }
 }
 
-init().catch((error) => {
-  console.error('[lp_host] init failed:', error);
-  window._lpOnProgress?.(100, 'Failed to start Mochart demo');
-});
+function init() {
+  window._lpOnProgress?.(20, 'Initializing WebGPU demo…');
+
+  const container = document.getElementById('chart-host');
+  if (!(container instanceof HTMLElement)) throw new Error('chart-host not found');
+
+  window._lpOnProgress?.(45, 'Starting unified worker…');
+
+  const host = new LpDemoHost(container);
+
+  window._lpOnProgress?.(70, 'Loading WASM + OHLCV data…');
+
+  window.addEventListener('beforeunload', () => host.destroy(), { once: true });
+
+  console.log('[lp_host] WebGPU native path via unified_worker', { build: LP_BUILD_VERSION });
+}
+
+init();
