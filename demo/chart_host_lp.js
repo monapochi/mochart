@@ -155,52 +155,10 @@ async function init() {
   }, { once: true });
 
   console.log('[lp_host] ready via public createChart()', { build: LP_BUILD_VERSION });
+}
 
 
 init().catch((error) => {
   console.error('[lp_host] init failed:', error);
   window._lpOnProgress?.(100, 'Failed to start Mochart demo');
 });
-    startBar !== prevStart ||
-    visBars  !== prevVis   ||
-    plotW    !== prevPlotW ||
-    plotH    !== prevPlotH ||
-    curFlags !== prevFlags;
-  const hudDirty = pointerX !== prevPtrX || pointerY !== prevPtrY;
-
-  if (!gpuDirty && !hudDirty) {
-    // idle — emit live stat update to LP overlay every 16 frames
-    if ((frameId & 15) === 0 && frameMsEwma > 0) {
-      window._lpOnPerf?.(1000 / frameMsEwma, lastPerfData?.frame?.ewma || frameMsEwma);
-    }
-    return;
-  }
-
-  prevStart = startBar;
-  prevVis   = visBars;
-  prevPlotW = plotW;
-  prevPlotH = plotH;
-  prevFlags = curFlags;
-  prevPtrX  = pointerX;
-  prevPtrY  = pointerY;
-
-  const dirtyBits = (gpuDirty ? GPU_DIRTY | HUD_DIRTY : 0) | (hudDirty ? HUD_DIRTY : 0);
-
-  const ci = 0;
-  Atomics.store(ctrl, ci * STRIDE + START_BAR, startBar);
-  Atomics.store(ctrl, ci * STRIDE + VIS_BARS,  visBars);
-  Atomics.store(ctrl, ci * STRIDE + PLOT_W,    f32ToI32(plotW));
-  Atomics.store(ctrl, ci * STRIDE + PLOT_H,    f32ToI32(plotH));
-  Atomics.store(ctrl, ci * STRIDE + POINTER_X, f32ToI32(pointerX));
-  Atomics.store(ctrl, ci * STRIDE + POINTER_Y, f32ToI32(pointerY));
-  Atomics.store(ctrl, ci * STRIDE + FLAGS,     curFlags);
-  Atomics.store(ctrl, ci * STRIDE + DIRTY,     dirtyBits);
-  Atomics.store(ctrl, ci * STRIDE + WAKE,     ++frameId);
-  Atomics.notify(ctrl, ci * STRIDE + WAKE);
-
-  if ((frameId & 15) === 0 && frameMsEwma > 0) {
-    window._lpOnPerf?.(1000 / frameMsEwma, lastPerfData?.frame?.ewma || frameMsEwma);
-  }
-}
-
-requestAnimationFrame(tick);
