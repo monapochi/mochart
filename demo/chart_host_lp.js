@@ -232,11 +232,14 @@ class LpDemoHost {
       e.preventDefault();
       const pt = this._localPoint(e);
       const cur = this.visibleBars;
+      // ctrlKey: trackpad pinch-to-zoom (deltaY ≈ 1–10, needs higher coefficient)
+      // Regular: mouse wheel / trackpad scroll (deltaY ≈ 50–150)
+      const zoomCoeff = e.ctrlKey ? 0.04 : 0.0015;
       const next = Math.max(
         MIN_VISIBLE_BARS,
         Math.min(
           Math.max(MIN_VISIBLE_BARS, this.totalBars || cur || DEFAULT_VISIBLE_BARS),
-          Math.round(cur * Math.exp(e.deltaY * 0.0015)),
+          Math.round(cur * Math.exp(e.deltaY * zoomCoeff)),
         ),
       );
       if (next === cur) return;
