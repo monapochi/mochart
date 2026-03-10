@@ -40,7 +40,7 @@ let _workerInitState = 0; // 0=idle, 1=initializing, 2=ready
 
 import {
   STRIDE, WAKE, READY, START_BAR, VIS_BARS,
-  PLOT_W, PLOT_H, FLAGS, SUBPIXEL_PAN_X,
+  PLOT_W, PLOT_H, FLAGS, SUBPIXEL_PAN_X, RIGHT_MARGIN_BARS,
   DIRTY, GPU_DIRTY, HUD_DIRTY,
   i32ToF32,
   FRAME_MAX_BARS,
@@ -746,6 +746,7 @@ async function dataLoop() {
     const plotH    = i32ToF32(Atomics.load(ctrl, ci * STRIDE + PLOT_H));
     const flags    = Atomics.load(ctrl, ci * STRIDE + FLAGS);
     const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
+    const rightMarginBars = Math.max(0, Atomics.load(ctrl, ci * STRIDE + RIGHT_MARGIN_BARS));
 
     if (plotW < 4 || plotH < 4 || visBars < 1) continue;
 
@@ -760,8 +761,9 @@ async function dataLoop() {
     const viewLen = store.view_len();
 
     // Candle width: 80% of slot in physical pixels, clamped [2px, 40px]
-    const candleW = visBars > 0
-      ? Math.max(2 * DPR, Math.min(40 * DPR, (physW / visBars) * 0.8))
+    const totalSlots = Math.max(1, visBars + rightMarginBars);
+    const candleW = totalSlots > 0
+      ? Math.max(2 * DPR, Math.min(40 * DPR, (physW / totalSlots) * 0.8))
       : 2 * DPR;
 
     const priceMin = store.view_price_min();

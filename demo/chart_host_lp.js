@@ -6,10 +6,11 @@
  * the LP can run through createChart() just like an external consumer.
  */
 
-const LP_BUILD_VERSION = '20260310c';
+const LP_BUILD_VERSION = '20260310d';
 const PERF_INTERVAL_MS = 250;
 const DEFAULT_VISIBLE_BARS = 200;
 const DEFAULT_PANES = { gap: 2, weights: [7, 1.5, 1.5] };
+const MAX_DISPLAY_FPS = 120;
 const COLOR_SMA_1 = [0.121, 0.466, 0.705, 1.0];
 const COLOR_SMA_2 = [1.0, 0.498, 0.054, 1.0];
 const COLOR_SMA_3 = [0.173, 0.627, 0.173, 1.0];
@@ -111,10 +112,14 @@ async function init() {
   const Mochart = await loadMochartModule();
   window._lpOnProgress?.(45, 'Starting worker-backed chart…');
 
+  const resolvedDpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+
   const chart = Mochart.createChart(chartRoot, {
     renderer: 'canvas-worker',
     dataUrl: new URL('../MSFT.bin', import.meta.url).href,
+    dpr: resolvedDpr,
     visibleBars: DEFAULT_VISIBLE_BARS,
+    rightMarginRatio: 0.12,
     panes: DEFAULT_PANES,
   });
 
@@ -136,7 +141,7 @@ async function init() {
   const perfTimer = window.setInterval(() => {
     const perf = chart.getPerformanceMetrics();
     if (perf?.frame?.ewma && perf.frame.ewma > 0) {
-      window._lpOnPerf?.(1000 / perf.frame.ewma, perf.frame.ewma);
+      window._lpOnPerf?.(Math.min(MAX_DISPLAY_FPS, 1000 / perf.frame.ewma), perf.frame.ewma);
     }
 
     if (!ready) {

@@ -392,7 +392,9 @@ export class GpuRenderer {
     const pmin     = fdbHdr.getFloat32(FBUF_PRICE_MIN, true);
     const pmax     = fdbHdr.getFloat32(FBUF_PRICE_MAX, true);
     const flags    = fdbHdr.getUint32 (FBUF_FLAGS,     true);
-    const slotW    = plotW / Math.max(1, visBc);
+    const rightMarginBars = (flags & 0x08) !== 0 ? Math.max(0, viewportShift.rightMarginBars | 0) : 0;
+    const totalSlots = Math.max(1, visBc + rightMarginBars);
+    const slotW    = plotW / totalSlots;
     const offsetSlots = viewportShift.extraLeftBars + (viewportShift.panOffsetPx / Math.max(1e-6, slotW));
 
     const DPR = this.dpr;
@@ -457,7 +459,7 @@ export class GpuRenderer {
       v.setFloat32( 4, candleW, true);  // cw
       v.setUint32 ( 8, viewLen, true);  // total_len
       v.setUint32 (12, 0,       true);  // start_index
-      v.setUint32 (16, visBc,   true);  // visible_count
+      v.setUint32 (16, totalSlots, true);  // visible_count (includes right whitespace at latest edge)
       v.setFloat32(20, mainH,   true);  // ph — main pane height (not full canvas)
       v.setFloat32(24, DPR,     true);  // border_width (1.0 CSS px)
       v.setFloat32(28, offsetSlots, true);  // offset_slots

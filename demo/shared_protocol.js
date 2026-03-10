@@ -15,7 +15,10 @@
  *   6       POINTER_X   f32→i32    Pointer X in CSS px, or -1 when absent.
  *   7       POINTER_Y   f32→i32    Pointer Y in CSS px, or -1 when absent.
  *   8       FLAGS       i32        Bitfield: bit0=sma20, bit1=sma50, bit2=sma100, bit3=at_right, bit4=heatmap
- *   9-15    (reserved)  —          Future use (e.g. zoom target, layout hints).
+ *   9       DIRTY       i32        GPU/HUD dirty bitfield
+ *   10      SUBPIXEL_PAN_X f32→i32 Subpixel pan remainder in CSS px
+ *   11      RIGHT_MARGIN_BARS i32   Future/right-side whitespace slots when pinned to latest bar
+ *   12-15   (reserved)  —          Future use (e.g. zoom target, layout hints).
  *
  * Float values (PLOT_W/H, POINTER_X/Y) are stored as their raw IEEE-754 bit
  * pattern cast to i32. Use f32ToI32 / i32ToF32 to convert.
@@ -46,6 +49,7 @@ export const FLAGS     = 8;
  */
 export const DIRTY     = 9;
 export const SUBPIXEL_PAN_X = 10;
+export const RIGHT_MARGIN_BARS = 11;
 export const GPU_DIRTY = 1;  // bit 0
 export const HUD_DIRTY = 2;  // bit 1
 

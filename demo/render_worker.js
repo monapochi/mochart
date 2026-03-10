@@ -18,7 +18,7 @@
 import { GpuRenderer } from './gpu_renderer.js';
 import {
   STRIDE, WAKE, READY, DIRTY, GPU_DIRTY, HUD_DIRTY,
-  PLOT_W, PLOT_H, POINTER_X, POINTER_Y, SUBPIXEL_PAN_X,
+  PLOT_W, PLOT_H, POINTER_X, POINTER_Y, SUBPIXEL_PAN_X, RIGHT_MARGIN_BARS,
   i32ToF32,
   FRAME_MAX_BARS,
   FBUF_HDR_BYTES,
@@ -327,6 +327,7 @@ function renderLoop() {
         const [pMin, pMax] = gpuRenderer.drawGpu(frameBuf, fdbHdr, viewLen, {
           panOffsetPx,
           extraLeftBars: Math.max(0, fdbHdr.getUint32(FBUF_START_BAR, true) - frameStartBar),
+          rightMarginBars: Math.max(0, Atomics.load(ctrl, ci * STRIDE + RIGHT_MARGIN_BARS)),
         });
         _r64[R_CACHED_PMIN] = pMin;
         _r64[R_CACHED_PMAX] = pMax;
@@ -349,6 +350,8 @@ function renderLoop() {
         const ptrX  = i32ToF32(Atomics.load(ctrl, ci * STRIDE + POINTER_X));
         const ptrY  = i32ToF32(Atomics.load(ctrl, ci * STRIDE + POINTER_Y));
         const visBc = Atomics.load(ctrl, ci * STRIDE + 3);
+        const rightMarginBars = Math.max(0, Atomics.load(ctrl, ci * STRIDE + RIGHT_MARGIN_BARS));
+        const totalSlots = Math.max(1, visBc + rightMarginBars);
         const panOffsetPx = i32ToF32(Atomics.load(ctrl, ci * STRIDE + SUBPIXEL_PAN_X));
         const logicalStartBar = fdbHdr.getUint32(FBUF_START_BAR, true);
         const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
@@ -363,7 +366,7 @@ function renderLoop() {
           drawDateAxis(hud, plotW, plotH, viewLen);
           if (ptrX >= 0 && ptrY >= 0 && ptrX < plotW && ptrY < plotH) {
             const chartAreaW = plotW - 60;
-            const barStep = chartAreaW / Math.max(1, visBc);
+            const barStep = chartAreaW / totalSlots;
             const offsetSlots = (logicalStartBar - frameStartBar) + (panOffsetPx / Math.max(1e-6, barStep));
             const lIdx = Math.max(0, Math.min(viewLen - 1, Math.floor(ptrX / Math.max(1e-6, barStep) + offsetSlots)));
             let dateLabel = '';
@@ -469,8 +472,10 @@ function drawDateAxis(ctx, w, h, viewLen) {
   const logicalStartBar = fdbHdr.getUint32(FBUF_START_BAR, true);
   const frameStartBar = fdbHdr.getUint32(FBUF_FRAME_START_BAR, true);
   const visBars = Math.max(1, fdbHdr.getUint32(FBUF_VIS_BARS, true));
+  const rightMarginBars = Math.max(0, Atomics.load(ctrl, workerSlotId * STRIDE + RIGHT_MARGIN_BARS));
+  const totalSlots = Math.max(1, visBars + rightMarginBars);
   const panOffsetPx = i32ToF32(Atomics.load(ctrl, workerSlotId * STRIDE + SUBPIXEL_PAN_X));
-  const slotW = plotW / Math.max(1, visBars);
+  const slotW = plotW / totalSlots;
   const offsetSlots = (logicalStartBar - frameStartBar) + (panOffsetPx / Math.max(1e-6, slotW));
   // Use pre-allocated _fbTime view (FRAME_MAX_BARS capacity) — zero alloc
   const times = _fbTime;
@@ -482,7 +487,7 @@ function drawDateAxis(ctx, w, h, viewLen) {
   const TICKS = 6;
   for (let i = 0; i < TICKS; i++) {
     const frac = i / (TICKS - 1);
-    const localSlot = frac * Math.max(0, visBars - 1);
+    const localSlot = frac * Math.max(0, totalSlots - 1);
     const idx = Math.max(0, Math.min(viewLen - 1, Math.round(localSlot + offsetSlots)));
     const x = ((localSlot + 0.5) - (panOffsetPx / Math.max(1e-6, slotW))) * slotW;
     ctx.fillText(isoDateStr(times[idx]), x, h - 2);

@@ -708,7 +708,7 @@
   We must guard the module load to avoid executing before isolation is active.
 -->
 <script>
-  const LP_ASSET_VERSION = '20260310c';
+  const LP_ASSET_VERSION = '20260310d';
   if (window.crossOriginIsolated) {
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');
@@ -747,7 +747,7 @@
 
   window._lpOnPerf = (fps, renderMs) => {
     const fpsEl = document.getElementById('stat-fps-val');
-    if (fpsEl) fpsEl.textContent = fps.toFixed(0);
+    if (fpsEl) fpsEl.textContent = Math.min(120, fps).toFixed(0);
     const renderEl = document.getElementById('stat-render-val');
     if (renderEl) renderEl.textContent = renderMs.toFixed(1) + ' ms';
   };
