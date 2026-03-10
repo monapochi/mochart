@@ -529,6 +529,12 @@
 <section id="metrics">
   <p class="section-label">Performance</p>
   <h2>Built for speed, by design.</h2>
+  <p style="color:var(--muted); margin-top:12px; max-width:680px; line-height:1.7; font-size:15px;">
+    Mochart keeps the visible OHLCV working set in a cache-friendly SoA layout so hot scans stay inside
+    CPU cache as often as possible. Roughly one screen of data is about <strong style="color:var(--text)">24 KB</strong>
+    in columnar form, which is small enough to target <strong style="color:var(--text)">L1 cache residency</strong>
+    and maintain a high cache hit rate while panning, range scanning, and updating indicators.
+  </p>
 
   <div class="metrics-grid">
     <div class="metric-card">
@@ -560,6 +566,11 @@
       <div class="m-val">1</div>
       <div class="m-unit">GPU draw call</div>
       <div class="m-label">Instanced rendering — entire chart in one command</div>
+    </div>
+    <div class="metric-card">
+      <div class="m-val">24</div>
+      <div class="m-unit">KB / screen</div>
+      <div class="m-label">Columnar SoA visible window sized for CPU cache locality</div>
     </div>
   </div>
 </section>
@@ -697,7 +708,7 @@
   We must guard the module load to avoid executing before isolation is active.
 -->
 <script>
-  const LP_ASSET_VERSION = '20260310a';
+  const LP_ASSET_VERSION = '20260310b';
   if (window.crossOriginIsolated) {
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');
