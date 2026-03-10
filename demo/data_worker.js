@@ -760,10 +760,10 @@ async function dataLoop() {
     store.decompress_view_window(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
 
-    // Candle width: 80% of slot in physical pixels, clamped [2px, 40px]
+    // Candle width: 80% of slot in physical pixels, clamped [1px, 40px]
     const totalSlots = Math.max(1, visBars + rightMarginBars);
     const candleW = totalSlots > 0
-      ? Math.max(2 * DPR, Math.min(40 * DPR, (physW / totalSlots) * 0.8))
+      ? Math.max(1, Math.min(40 * DPR, (physW / totalSlots) * 0.8))
       : 2 * DPR;
 
     const priceMin = store.view_price_min();
@@ -809,7 +809,7 @@ async function dataLoop() {
     // ── Write FDB header ───────────────────────────────────────────────
     frameSeq++;
     fdbView.setUint32 (FBUF_START_BAR,  startBar,  true);
-    fdbView.setUint32 (FBUF_VIS_BARS,   visBars,   true);
+    fdbView.setUint32 (FBUF_VIS_BARS,   Math.min(visBars, viewLen2),   true);
     fdbView.setUint32 (FBUF_VIEW_LEN,   viewLen2,  true);
     fdbView.setUint32 (FBUF_FRAME_START_BAR, frameStartBar, true);
     fdbView.setFloat32(FBUF_PRICE_MIN,  priceMin,  true);
