@@ -809,7 +809,7 @@ async function dataLoop() {
     // ── Write FDB header ───────────────────────────────────────────────
     frameSeq++;
     fdbView.setUint32 (FBUF_START_BAR,  startBar,  true);
-    fdbView.setUint32 (FBUF_VIS_BARS,   Math.min(visBars, viewLen2),   true);
+    fdbView.setUint32 (FBUF_VIS_BARS,   visBars,   true);
     fdbView.setUint32 (FBUF_VIEW_LEN,   viewLen2,  true);
     fdbView.setUint32 (FBUF_FRAME_START_BAR, frameStartBar, true);
     fdbView.setFloat32(FBUF_PRICE_MIN,  priceMin,  true);

@@ -117,7 +117,7 @@ export function makeSlotDescriptor(slotId, ctrlBuf, frameCtrl, frameBuf, indSab)
 // but allocFrameBuf() now uses the compact layout by default.
 
 /** Maximum visible bars supported (must equal or exceed any visBars value). */
-export const FRAME_MAX_BARS = 4096;
+export const FRAME_MAX_BARS = 16384;
 
 // ── FDB header byte offsets (128B, #[repr(C, align(16))]) ─────────────────
 // Must match Rust FrameDescriptor layout in store.rs exactly.
