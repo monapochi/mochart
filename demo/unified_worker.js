@@ -23,8 +23,8 @@ import {
   INDSAB_OVERLAY_STD430_OFF, INDSAB_OVERLAY_STD430_WORDS, INDSAB_OVERLAY_REV_OFF,
 } from './shared_protocol.js';
 
-const WORKER_BUILD_VERSION = '20260310d';
-const WASM_GLUE_VERSION = '20260310d';
+const WORKER_BUILD_VERSION = '20260311a';
+const WASM_GLUE_VERSION = '20260311a';
 const WASM_MODULE_PATHS = [
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,

@@ -29,7 +29,7 @@ import {
   i32ToF32,
 } from './shared_protocol.js';
 
-const LP_BUILD_VERSION = '20260310f';
+const LP_BUILD_VERSION = '20260311a';
 const PERF_INTERVAL_MS = 250;
 const DEFAULT_VISIBLE_BARS = 200;
 const RIGHT_MARGIN_RATIO = 0.1;
