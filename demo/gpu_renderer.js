@@ -1233,7 +1233,7 @@ export class GpuRenderer {
       // @zero_alloc_allow: Volume profile buffer grows only if a larger bin count is requested.
       this.vpBuffer = device.createBuffer({ size: binBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     }
-    queue.writeBuffer(this.vpBuffer, 0, this._vpZeroBuf.subarray(0, binCount));
+    queue.writeBuffer(this.vpBuffer, 0, this._vpZeroBuf, 0, binCount);
 
     // params buffer: total_len, start_index, visible_count, num_bins, price_min(f32), price_max(f32)
     const pbuf = this._vpParamsBuf;

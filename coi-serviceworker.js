@@ -27,6 +27,15 @@ if (typeof window === 'undefined') {
     if (!request.url.startsWith('http')) return;
     if (request.cache === 'only-if-cached' && request.mode !== 'same-origin') return;
 
+    // Optimization: Intercepting large data files (JSON) and WASM binaries 
+    // forces V8 to buffer them in JS heap and breaks streaming compilation.
+    // COOP/COEP headers are only strictly required for navigation and workers.
+    const isNavigation = request.mode === 'navigate';
+    const isWorker = request.destination === 'worker' || request.destination === 'sharedworker';
+    if (!isNavigation && !isWorker) {
+      return;
+    }
+
     const fetchRequest = (coepCredentialless && request.mode === 'no-cors')
       ? new Request(request, { credentials: 'omit' })
       : request;

@@ -152,12 +152,10 @@ class LpDemoHost {
         return;
       }
       if (msg?.type === 'perf') {
-        this.perf = {
-          wasm: msg.wasm,
-          gpu: msg.gpu,
-          hud: msg.hud,
-          frame: msg.frame,
-        };
+        this.perf.wasm = msg.wasm;
+        this.perf.gpu = msg.gpu;
+        this.perf.hud = msg.hud;
+        this.perf.frame = msg.frame;
         return;
       }
       if (msg?.type === 'error') {
@@ -284,11 +282,11 @@ class LpDemoHost {
   }
 
   _localPoint(e) {
+    if (!this._pt) this._pt = { x: 0, y: 0 };
     const rect = this.hudCanvas.getBoundingClientRect();
-    return {
-      x: Math.min(Math.max(0, e.clientX - rect.left), Math.max(0, rect.width - 1)),
-      y: Math.min(Math.max(0, e.clientY - rect.top), Math.max(0, rect.height - 1)),
-    };
+    this._pt.x = Math.min(Math.max(0, e.clientX - rect.left), Math.max(0, rect.width - 1));
+    this._pt.y = Math.min(Math.max(0, e.clientY - rect.top), Math.max(0, rect.height - 1));
+    return this._pt;
   }
 
   _slotWidth() {

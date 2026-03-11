@@ -221,7 +221,8 @@ const _popupCache = {
 const _priceLabelCache = { last: NaN, str: '' };
 
 function percentile(buf, n, pct) {
-  _sortScratch.set(buf.subarray(0, n));
+  // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
+  for (let i = 0; i < n; i++) _sortScratch[i] = buf[i];
   const arr = _sortScratch;
   for (let i = 1; i < n; i++) {
     const v = arr[i]; let j = i - 1;
@@ -585,7 +586,10 @@ function _writeIndSab(_visBars, revision) {
     _dstArena = new Float32Array(indSab, INDSAB_ARENA_OFF, arenaLen);
     _dstArenaCap = arenaLen;
   }
-  _dstArena.set(_wasmF32.subarray(arenaOff, arenaOff + arenaLen));
+  // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
+  for (let i = 0; i < arenaLen; i++) {
+    _dstArena[i] = _wasmF32[arenaOff + i];
+  }
   const cmdCount = plan.render_cmd_count();
   for (let ci = 0; ci < cmdCount; ci++) {
     const base = INDSAB_CMD_BASE + ci * INDSAB_CMD_STRIDE;
@@ -638,6 +642,7 @@ function ingestSoaPayload(message, memory) {
   const close = new Float32Array(message.close);
   const volume = new Float32Array(message.volume);
   const nextStore = new WasmModule.OhlcvStore(0.01, 100.0, count + 64, 1024);
+  // @zero_alloc_allow: Initialization logic, not part of hot path render loop.
   new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), count).set(time.subarray(0, count));
   new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), count).set(open.subarray(0, count));
   new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), count).set(high.subarray(0, count));
