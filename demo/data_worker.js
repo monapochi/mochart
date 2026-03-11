@@ -60,6 +60,7 @@ import {
   FBUF_VIEW_OPEN_PTR, FBUF_VIEW_HIGH_PTR, FBUF_VIEW_LOW_PTR, FBUF_VIEW_CLOSE_PTR, FBUF_VIEW_VOL_PTR, FBUF_VIEW_TIME_PTR,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX,
   FBUF_CANVAS_W, FBUF_CANVAS_H, FBUF_CANDLE_W,
+  FBUF_TICK_SIZE, FBUF_BASE_PRICE,
   FBUF_FLAGS, FBUF_SEQ, FBUF_TOTAL_BARS,
   FBUF_FRAME_START_BAR,
   FBUF_HDR_BYTES,
@@ -358,6 +359,8 @@ const _frameDescriptor = {
   physH: 0,
   candleW: 1,
   frameStartBar: 0,
+  tickSize: 0.01,
+  basePrice: 0,
 };
 const _indSabResizeMsg = { type: 'ind_sab_resize', slotId: 0, arenaF32Count: 0 };
 
@@ -413,6 +416,8 @@ function _writeFrameDescriptor(targetView, descriptor) {
   targetView.setFloat32(FBUF_CANVAS_W, descriptor.physW, true);
   targetView.setFloat32(FBUF_CANVAS_H, descriptor.physH, true);
   targetView.setFloat32(FBUF_CANDLE_W, descriptor.candleW, true);
+  targetView.setFloat32(FBUF_TICK_SIZE, descriptor.tickSize, true);
+  targetView.setFloat32(FBUF_BASE_PRICE, descriptor.basePrice, true);
   targetView.setUint32(FBUF_FRAME_START_BAR, descriptor.frameStartBar, true);
   targetView.setUint32(FBUF_VIEW_TIME_PTR, descriptor.timePtr, true);
 }
@@ -852,6 +857,7 @@ async function dataLoop() {
     const frameStartBar = hasSubpixelPan ? Math.max(0, startBar - 1) : startBar;
     const frameVisibleBars = hasSubpixelPan ? Math.min(FRAME_MAX_BARS, visBars + 2) : visBars;
     store.decompress_view_window(frameStartBar, frameVisibleBars);
+    store.prepare_packed_upload(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
 
     // Candle width: 80% of slot in physical pixels, clamped [1px, 40px]
@@ -926,6 +932,16 @@ async function dataLoop() {
     _frameDescriptor.physH = physH;
     _frameDescriptor.candleW = candleW;
     _frameDescriptor.frameStartBar = frameStartBar;
+    _frameDescriptor.tickSize = store.tick_size();
+    _frameDescriptor.basePrice = store.base_price();
+    _frameDescriptor.packedPayloadPtr = store.packed_upload_payload_ptr() >>> 0;
+    _frameDescriptor.packedPayloadLenBytes = store.packed_upload_payload_len_bytes() >>> 0;
+    _frameDescriptor.packedMetaPtr = store.packed_upload_meta_ptr() >>> 0;
+    _frameDescriptor.packedMetaLenBytes = store.packed_upload_meta_len_bytes() >>> 0;
+    _frameDescriptor.packedBlockCount = store.packed_upload_block_count() >>> 0;
+    _frameDescriptor.packedFirstBarOffset = store.packed_upload_first_bar_offset() >>> 0;
+    _frameDescriptor.packedBarCount = store.packed_upload_bar_count() >>> 0;
+    _frameDescriptor.packedFlags = _frameDescriptor.packedBlockCount > 0 ? 1 : 0;
     _writeFrameDescriptor(fdbView, _frameDescriptor);
     if (_sharedFdbView) {
       _writeFrameDescriptor(_sharedFdbView, _frameDescriptor);

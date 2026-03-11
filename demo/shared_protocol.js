@@ -146,12 +146,25 @@ export const FBUF_CANDLE_W   = 64;  // f32 — candle body width (px)
 export const FBUF_DPR        = 68;  // f32 — device pixel ratio
 export const FBUF_CACHE_VALID = 72; // u32 — bitmask of valid caches
 export const FBUF_DIRTY_START = 76; // u32 — dirty range start bar
+// Prototype aliases for packed-direct minmax. These reuse currently-unused
+// FDB fields in the JS path so we can evaluate direct decode without growing
+// the frame descriptor contract again.
+export const FBUF_TICK_SIZE  = 68;  // f32 — aliases FBUF_DPR in JS path
+export const FBUF_BASE_PRICE = 72;  // f32 — aliases FBUF_CACHE_VALID in JS path
 // vec4<u32> #5 (bytes 80-95)
 export const FBUF_DIRTY_END      = 80;  // u32 — dirty range end bar
 export const FBUF_INDICATOR_GEN  = 84;  // u32 — indicator generation counter
 export const FBUF_FRAME_START_BAR = 88;  // u32 — actual first bar copied into frameBuf
 export const FBUF_VIEW_TIME_PTR   = 92;  // u32 — WASM linear memory offset of view_time[0]
-// bytes 96-127 reserved
+// vec4<u32> #6 (bytes 96-111) — packed block upload metadata
+export const FBUF_PACKED_PAYLOAD_PTR       = 96;
+export const FBUF_PACKED_META_PTR          = 104;
+export const FBUF_PACKED_META_LEN_BYTES    = 108;
+// vec4<u32> #7 (bytes 112-127)
+export const FBUF_PACKED_BLOCK_COUNT       = 112;
+export const FBUF_PACKED_FIRST_BAR_OFFSET  = 116;
+export const FBUF_PACKED_BAR_COUNT         = 120;
+export const FBUF_PACKED_FLAGS             = 124;
 
 export const FBUF_HDR_BYTES = 128;
 

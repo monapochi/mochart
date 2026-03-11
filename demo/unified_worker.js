@@ -88,6 +88,8 @@ const _frameState = {
   candleW: 1,
   frameStartBar: 0,
   timePtr: 0,
+  tickSize: 0.01,
+  basePrice: 0,
 };
 let totalBars = 0;
 let frameSeq = 0;
@@ -185,6 +187,8 @@ const _frameDescriptor = {
   physH: 0,
   candleW: 1,
   frameStartBar: 0,
+  tickSize: 0.01,
+  basePrice: 0,
 };
 const _indSabResizeMsg = { type: 'ind_sab_resize', slotId: 0, arenaF32Count: 0 };
 const _perfMsg = {
@@ -466,6 +470,8 @@ function _writeFrameState(descriptor) {
   _frameState.candleW = descriptor.candleW;
   _frameState.frameStartBar = descriptor.frameStartBar;
   _frameState.timePtr = descriptor.timePtr;
+  _frameState.tickSize = descriptor.tickSize;
+  _frameState.basePrice = descriptor.basePrice;
 }
 
 async function ensureWasmInitialized() {
@@ -1021,6 +1027,7 @@ function renderLoop() {
     const frameStartBar = hasSubpixelPan ? Math.max(0, startBar - 1) : startBar;
     const frameVisibleBars = hasSubpixelPan ? Math.min(FRAME_MAX_BARS, visBars + 2) : visBars;
     store.decompress_view_window(frameStartBar, frameVisibleBars);
+    store.prepare_packed_upload(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
     const totalSlots = Math.max(1, visBars + rightMarginBars);
     const candleW = totalSlots > 0 ? Math.max(1, Math.min(40 * DPR, (physW / totalSlots) * 0.8)) : 2 * DPR;
@@ -1048,6 +1055,16 @@ function renderLoop() {
     _frameDescriptor.physH = physH;
     _frameDescriptor.candleW = candleW;
     _frameDescriptor.frameStartBar = frameStartBar;
+    _frameDescriptor.tickSize = store.tick_size();
+    _frameDescriptor.basePrice = store.base_price();
+    _frameDescriptor.packedPayloadPtr = store.packed_upload_payload_ptr() >>> 0;
+    _frameDescriptor.packedPayloadLenBytes = store.packed_upload_payload_len_bytes() >>> 0;
+    _frameDescriptor.packedMetaPtr = store.packed_upload_meta_ptr() >>> 0;
+    _frameDescriptor.packedMetaLenBytes = store.packed_upload_meta_len_bytes() >>> 0;
+    _frameDescriptor.packedBlockCount = store.packed_upload_block_count() >>> 0;
+    _frameDescriptor.packedFirstBarOffset = store.packed_upload_first_bar_offset() >>> 0;
+    _frameDescriptor.packedBarCount = store.packed_upload_bar_count() >>> 0;
+    _frameDescriptor.packedFlags = _frameDescriptor.packedBlockCount > 0 ? 1 : 0;
     _writeFrameState(_frameDescriptor);
     const t_wasm_ms = performance.now() - t0_wasm;
     _r64[R_WASM_MS] = _r64[R_WASM_MS] * 0.9 + t_wasm_ms * 0.1;
