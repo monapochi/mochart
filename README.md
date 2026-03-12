@@ -13,13 +13,13 @@ High-performance financial charting library for the web. WebGPU + Rust/WASM. 1M+
 ## Install
 
 ```bash
-npm install mochart
+npm install @monasche/mochart
 ```
 
 ## Basic Usage
 
 ```ts
-import { createChart } from 'mochart';
+import { createChart } from '@monasche/mochart';
 
 const data = [
   { time: 1704067200, open: 100, high: 105, low: 98, close: 103, volume: 1200 },
@@ -53,7 +53,7 @@ const tupleBars = [
 ## Indicators
 
 ```ts
-import { createChart, IndicatorKind } from 'mochart';
+import { createChart, IndicatorKind } from '@monasche/mochart';
 
 const chart = createChart(document.getElementById('chart')!, {
   data,
