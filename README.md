@@ -92,9 +92,57 @@ chart.on('viewportChange', (event) => {
 
 ## Notes
 
-- The default path uses Mochart's worker-backed runtime.
-- If your app serves assets from a custom location, set `globalThis.__MOCHART_ASSET_BASE_URL__` before creating the chart.
-- Worker-backed rendering requires `SharedArrayBuffer`, so your page must be served with COOP/COEP enabled.
+### SharedArrayBuffer & COOP/COEP
+
+Mochart's worker-backed runtime uses `SharedArrayBuffer` for zero-copy data transfer between the main thread and the render/data workers. Browsers require the page to be **cross-origin isolated** to use `SharedArrayBuffer`.
+
+**Option A — Set HTTP headers on your server (recommended)**
+
+Add these headers to every response:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Example: Vite (`vite.config.ts`)
+
+```ts
+export default {
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
+};
+```
+
+**Option B — Use `coi-serviceworker.js` for static hosting (GitHub Pages, Netlify, etc.)**
+
+When you cannot control HTTP headers, a Service Worker can inject them on the client side.
+
+1. Download [`coi-serviceworker.js`](https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker/coi-serviceworker.js) and place it in your site root (same directory as your HTML file).
+2. Add the script tag as the **first** `<script>` in `<head>` — before any other scripts:
+
+```html
+<head>
+  <!-- Must be listed first, before any other scripts -->
+  <script src="coi-serviceworker.js"></script>
+  <!-- Do NOT add ?v= or other query params to the src — Chrome will reject the SW registration -->
+</head>
+```
+
+> On first load the Service Worker installs and reloads the page automatically. After the reload `crossOriginIsolated` will be `true` and `SharedArrayBuffer` will be available.
+
+### Asset base URL
+
+If your app serves assets from a custom location, set `globalThis.__MOCHART_ASSET_BASE_URL__` before creating the chart:
+
+```ts
+globalThis.__MOCHART_ASSET_BASE_URL__ = '/static/mochart/';
+const chart = createChart(el, { data });
+```
 
 ## License
 
