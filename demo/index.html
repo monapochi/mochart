@@ -713,7 +713,7 @@
     // SW is active and headers are injected — safe to use SharedArrayBuffer.
     const s = document.createElement('script');
     s.type = 'module';
-    s.src = `demo/chart_host_lp.js?v=${LP_ASSET_VERSION}`;
+    s.src = `./chart_host_lp.js?v=${LP_ASSET_VERSION}`;
     document.body.appendChild(s);
   } else {
     // First visit or SW not yet active — coi-serviceworker.js will reload.
