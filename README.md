@@ -21,7 +21,10 @@ npm install @monasche/mochart
 Mochart's data engine and GPU renderer run in a dedicated Worker. You must start it and pass it to `createChart` via the `dataWorker` option — **the chart will not load data without this**.
 
 The Worker entry point is `@monasche/mochart/worker/data` (resolves to `dist/demo/unifiedWorker.js`).
-Each bundler has a different way to instantiate Workers:
+Each bundler has a different way to instantiate Workers.
+
+> **⚠️ Important rule for React / Vue:**
+> In component-based frameworks, do not create `new Worker()` indiscriminately inside the render cycle or `useEffect` without proper cleanup, as this causes memory leaks. Either create the Worker once as a module-level singleton, or terminate it on unmount (`worker.terminate()`).
 
 ### Vite
 
