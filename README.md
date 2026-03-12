@@ -16,6 +16,48 @@ High-performance financial charting library for the web. WebGPU + Rust/WASM. 1M+
 npm install @monasche/mochart
 ```
 
+## Worker Setup
+
+Mochart's data engine and GPU renderer run in a dedicated Worker. You must start it and pass it to `createChart` via the `dataWorker` option — **the chart will not load data without this**.
+
+### Vite / bundler
+
+```ts
+import { createChart } from '@monasche/mochart';
+import UnifiedWorker from '@monasche/mochart/worker/data?worker';
+
+const worker = new UnifiedWorker();
+
+const chart = createChart(document.getElementById('chart')!, {
+  dataWorker: worker,
+  width: 960,
+  height: 480,
+});
+
+chart.setDataUrl('./MSFT.bin');   // or chart.setData(ohlcvArray)
+```
+
+> The `?worker` suffix is Vite's syntax. For webpack/rspack use `new Worker(new URL('@monasche/mochart/worker/data', import.meta.url))`.
+
+### Vanilla (no bundler)
+
+```html
+<script type="module">
+  import { createChart } from '/node_modules/@monasche/mochart/dist/index.js';
+
+  const worker = new Worker(
+    '/node_modules/@monasche/mochart/dist/demo/unifiedWorker.js',
+    { type: 'module' }
+  );
+
+  const chart = createChart(document.getElementById('chart'), {
+    dataWorker: worker,
+    width: 960,
+    height: 480,
+  });
+</script>
+```
+
 ## Basic Usage
 
 ```ts
