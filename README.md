@@ -96,6 +96,8 @@ chart.on('viewportChange', (event) => {
 
 Mochart's worker-backed runtime uses `SharedArrayBuffer` for zero-copy data transfer between the main thread and the render/data workers. Browsers require the page to be **cross-origin isolated** to use `SharedArrayBuffer`.
 
+> **`coi-serviceworker.js` is NOT included in the npm package.** You must provide cross-origin isolation yourself via one of the options below.
+
 **Option A — Set HTTP headers on your server (recommended)**
 
 Add these headers to every response:
@@ -123,17 +125,29 @@ export default {
 When you cannot control HTTP headers, a Service Worker can inject them on the client side.
 
 1. Download [`coi-serviceworker.js`](https://cdn.jsdelivr.net/gh/gzuidhof/coi-serviceworker/coi-serviceworker.js) and place it in your site root (same directory as your HTML file).
-2. Add the script tag as the **first** `<script>` in `<head>` — before any other scripts:
+2. Add the script tag as the **first** `<script>` in `<head>`:
 
 ```html
 <head>
   <!-- Must be listed first, before any other scripts -->
   <script src="coi-serviceworker.js"></script>
-  <!-- Do NOT add ?v= or other query params to the src — Chrome will reject the SW registration -->
+  <!-- Do NOT add ?v= or other query params — Chrome rejects SW registration with query strings -->
 </head>
 ```
 
-> On first load the Service Worker installs and reloads the page automatically. After the reload `crossOriginIsolated` will be `true` and `SharedArrayBuffer` will be available.
+3. Guard your app initialization with `crossOriginIsolated`, since the first page load installs the SW and reloads automatically:
+
+```ts
+if (window.crossOriginIsolated) {
+  // Safe to use SharedArrayBuffer — start the chart
+  const chart = createChart(el, { data });
+} else {
+  // First visit: coi-serviceworker.js is installing and will reload the page.
+  // No action needed here.
+}
+```
+
+> On first load the Service Worker installs and reloads the page automatically. After the reload `crossOriginIsolated` will be `true` and Mochart will work normally.
 
 ### Asset base URL
 
