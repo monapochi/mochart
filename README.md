@@ -90,4 +90,10 @@ chart.on('viewportChange', (event) => {
 
 ## License
 
-See [LICENSE](./LICENSE).
+Mochart is licensed under the [Business Source License 1.1](./LICENSE).
+
+- **Non-commercial / small teams**: Free to use (individuals and organizations with fewer than 10 employees).
+- **Commercial use**: Requires a separate commercial license. Contact us via [GitHub Issues](https://github.com/monapochi/mochart/issues).
+- **Change Date**: Each version converts to MIT License four years after its first public release.
+
+> **Note (Alpha stage)**: License enforcement is deferred while Mochart is in pre-alpha. Non-commercial use is unrestricted during this period. Non-commercial builds display a "Powered by Mochart" watermark.

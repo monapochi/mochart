@@ -60,7 +60,6 @@ import {
   FBUF_VIEW_OPEN_PTR, FBUF_VIEW_HIGH_PTR, FBUF_VIEW_LOW_PTR, FBUF_VIEW_CLOSE_PTR, FBUF_VIEW_VOL_PTR, FBUF_VIEW_TIME_PTR,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX,
   FBUF_CANVAS_W, FBUF_CANVAS_H, FBUF_CANDLE_W,
-  FBUF_TICK_SIZE, FBUF_BASE_PRICE,
   FBUF_FLAGS, FBUF_SEQ, FBUF_TOTAL_BARS,
   FBUF_FRAME_START_BAR,
   FBUF_HDR_BYTES,
@@ -359,8 +358,6 @@ const _frameDescriptor = {
   physH: 0,
   candleW: 1,
   frameStartBar: 0,
-  tickSize: 0.01,
-  basePrice: 0,
 };
 const _indSabResizeMsg = { type: 'ind_sab_resize', slotId: 0, arenaF32Count: 0 };
 
@@ -416,8 +413,6 @@ function _writeFrameDescriptor(targetView, descriptor) {
   targetView.setFloat32(FBUF_CANVAS_W, descriptor.physW, true);
   targetView.setFloat32(FBUF_CANVAS_H, descriptor.physH, true);
   targetView.setFloat32(FBUF_CANDLE_W, descriptor.candleW, true);
-  targetView.setFloat32(FBUF_TICK_SIZE, descriptor.tickSize, true);
-  targetView.setFloat32(FBUF_BASE_PRICE, descriptor.basePrice, true);
   targetView.setUint32(FBUF_FRAME_START_BAR, descriptor.frameStartBar, true);
   targetView.setUint32(FBUF_VIEW_TIME_PTR, descriptor.timePtr, true);
 }
@@ -857,7 +852,6 @@ async function dataLoop() {
     const frameStartBar = hasSubpixelPan ? Math.max(0, startBar - 1) : startBar;
     const frameVisibleBars = hasSubpixelPan ? Math.min(FRAME_MAX_BARS, visBars + 2) : visBars;
     store.decompress_view_window(frameStartBar, frameVisibleBars);
-    store.prepare_packed_upload(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
 
     // Candle width: 80% of slot in physical pixels, clamped [1px, 40px]
@@ -902,15 +896,14 @@ async function dataLoop() {
       const cOff = closePtr >> 2;
       const vOff = volPtr >> 2;
       const tOff = timePtr >> 3;  // f64 → /8
-      // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
-      for (let i = 0; i < viewLen2; i++) {
-        _dstOpen[i]  = _wasmF32[oOff + i];
-        _dstHigh[i]  = _wasmF32[hOff + i];
-        _dstLow[i]   = _wasmF32[lOff + i];
-        _dstClose[i] = _wasmF32[cOff + i];
-        _dstVol[i]   = _wasmF32[vOff + i];
-        _dstTime[i]  = _wasmF64[tOff + i];
-      }
+      // .set(src) copies src.length elements into the pre-allocated dst.
+      // subarray() returns a lightweight view (no data copy, ~64B object).
+      _dstOpen .set(_wasmF32.subarray(oOff, oOff + viewLen2));
+      _dstHigh .set(_wasmF32.subarray(hOff, hOff + viewLen2));
+      _dstLow  .set(_wasmF32.subarray(lOff, lOff + viewLen2));
+      _dstClose.set(_wasmF32.subarray(cOff, cOff + viewLen2));
+      _dstVol  .set(_wasmF32.subarray(vOff, vOff + viewLen2));
+      _dstTime .set(_wasmF64.subarray(tOff, tOff + viewLen2));
     }
 
     // ── Write FDB header ───────────────────────────────────────────────
@@ -933,16 +926,6 @@ async function dataLoop() {
     _frameDescriptor.physH = physH;
     _frameDescriptor.candleW = candleW;
     _frameDescriptor.frameStartBar = frameStartBar;
-    _frameDescriptor.tickSize = store.tick_size();
-    _frameDescriptor.basePrice = store.base_price();
-    _frameDescriptor.packedPayloadPtr = store.packed_upload_payload_ptr() >>> 0;
-    _frameDescriptor.packedPayloadLenBytes = store.packed_upload_payload_len_bytes() >>> 0;
-    _frameDescriptor.packedMetaPtr = store.packed_upload_meta_ptr() >>> 0;
-    _frameDescriptor.packedMetaLenBytes = store.packed_upload_meta_len_bytes() >>> 0;
-    _frameDescriptor.packedBlockCount = store.packed_upload_block_count() >>> 0;
-    _frameDescriptor.packedFirstBarOffset = store.packed_upload_first_bar_offset() >>> 0;
-    _frameDescriptor.packedBarCount = store.packed_upload_bar_count() >>> 0;
-    _frameDescriptor.packedFlags = _frameDescriptor.packedBlockCount > 0 ? 1 : 0;
     _writeFrameDescriptor(fdbView, _frameDescriptor);
     if (_sharedFdbView) {
       _writeFrameDescriptor(_sharedFdbView, _frameDescriptor);
@@ -993,10 +976,7 @@ function _writeIndSab(_visBars, revision) {
       _dstArena    = new Float32Array(indSab, INDSAB_ARENA_OFF, arenaLen);
       _dstArenaCap = arenaLen;
     }
-    // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
-    for (let i = 0; i < arenaLen; i++) {
-      _dstArena[i] = _wasmF32[arenaIdx + i];
-    }
+    _dstArena.set(_wasmF32.subarray(arenaIdx, arenaIdx + arenaLen));
   }
 
   // Write render cmd records into header
@@ -1069,7 +1049,6 @@ function ingestSoaPayload(payload, memory) {
 
   const nextStore = new WasmModule.OhlcvStore(0.01, 100.0, N + 64, 1024);
 
-  // @zero_alloc_allow: Initialization logic, not part of hot path render loop.
   new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), N).set(time.subarray(0, N));
   new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), N).set(open.subarray(0, N));
   new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), N).set(high.subarray(0, N));

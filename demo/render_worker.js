@@ -799,6 +799,12 @@ function drawLegend(ctx, flags, overlaySummary) {
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     // @zero_alloc_allow: Compact HUD text is generated once per frame and bounded.
     ctx.fillText(`ANN ${total} M${marker} H${hline} Z${zone} T${text} E${event}`, x, 9);
-  }
-  ctx.restore();
+  }  // Watermark — displayed on non-commercial builds (BSL free tier)
+  const _ww = ctx.canvas.width / DPR;
+  const _wh = ctx.canvas.height / DPR;
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(100,100,100,0.35)';
+  ctx.fillText('Powered by Mochart α', _ww - 6, _wh - 6);  ctx.restore();
 }

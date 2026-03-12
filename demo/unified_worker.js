@@ -88,8 +88,6 @@ const _frameState = {
   candleW: 1,
   frameStartBar: 0,
   timePtr: 0,
-  tickSize: 0.01,
-  basePrice: 0,
 };
 let totalBars = 0;
 let frameSeq = 0;
@@ -187,8 +185,6 @@ const _frameDescriptor = {
   physH: 0,
   candleW: 1,
   frameStartBar: 0,
-  tickSize: 0.01,
-  basePrice: 0,
 };
 const _indSabResizeMsg = { type: 'ind_sab_resize', slotId: 0, arenaF32Count: 0 };
 const _perfMsg = {
@@ -221,8 +217,7 @@ const _popupCache = {
 const _priceLabelCache = { last: NaN, str: '' };
 
 function percentile(buf, n, pct) {
-  // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
-  for (let i = 0; i < n; i++) _sortScratch[i] = buf[i];
+  _sortScratch.set(buf.subarray(0, n));
   const arr = _sortScratch;
   for (let i = 1; i < n; i++) {
     const v = arr[i]; let j = i - 1;
@@ -471,8 +466,6 @@ function _writeFrameState(descriptor) {
   _frameState.candleW = descriptor.candleW;
   _frameState.frameStartBar = descriptor.frameStartBar;
   _frameState.timePtr = descriptor.timePtr;
-  _frameState.tickSize = descriptor.tickSize;
-  _frameState.basePrice = descriptor.basePrice;
 }
 
 async function ensureWasmInitialized() {
@@ -586,10 +579,7 @@ function _writeIndSab(_visBars, revision) {
     _dstArena = new Float32Array(indSab, INDSAB_ARENA_OFF, arenaLen);
     _dstArenaCap = arenaLen;
   }
-  // @zero_alloc_allow: Manual copy avoids Float32Array.subarray allocation.
-  for (let i = 0; i < arenaLen; i++) {
-    _dstArena[i] = _wasmF32[arenaOff + i];
-  }
+  _dstArena.set(_wasmF32.subarray(arenaOff, arenaOff + arenaLen));
   const cmdCount = plan.render_cmd_count();
   for (let ci = 0; ci < cmdCount; ci++) {
     const base = INDSAB_CMD_BASE + ci * INDSAB_CMD_STRIDE;
@@ -642,7 +632,6 @@ function ingestSoaPayload(message, memory) {
   const close = new Float32Array(message.close);
   const volume = new Float32Array(message.volume);
   const nextStore = new WasmModule.OhlcvStore(0.01, 100.0, count + 64, 1024);
-  // @zero_alloc_allow: Initialization logic, not part of hot path render loop.
   new Float64Array(memory.buffer, nextStore.ingest_time_ptr(), count).set(time.subarray(0, count));
   new Float32Array(memory.buffer, nextStore.ingest_open_ptr(), count).set(open.subarray(0, count));
   new Float32Array(memory.buffer, nextStore.ingest_high_ptr(), count).set(high.subarray(0, count));
@@ -948,6 +937,14 @@ function drawLegend(ctx, flags, overlaySummary) {
     // @zero_alloc_allow: Overlay summary text is generated for HUD display only.
     ctx.fillText(`ANN ${total} M${marker} H${hline} Z${zone} T${text} E${event}`, x, 9);
   }
+  // Watermark — displayed on non-commercial builds (BSL free tier)
+  const _ww = ctx.canvas.width / DPR;
+  const _wh = ctx.canvas.height / DPR;
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(100,100,100,0.35)';
+  ctx.fillText('Powered by Mochart α', _ww - 6, _wh - 6);
   ctx.restore();
 }
 
@@ -1032,7 +1029,6 @@ function renderLoop() {
     const frameStartBar = hasSubpixelPan ? Math.max(0, startBar - 1) : startBar;
     const frameVisibleBars = hasSubpixelPan ? Math.min(FRAME_MAX_BARS, visBars + 2) : visBars;
     store.decompress_view_window(frameStartBar, frameVisibleBars);
-    store.prepare_packed_upload(frameStartBar, frameVisibleBars);
     const viewLen = store.view_len();
     const totalSlots = Math.max(1, visBars + rightMarginBars);
     const candleW = totalSlots > 0 ? Math.max(1, Math.min(40 * DPR, (physW / totalSlots) * 0.8)) : 2 * DPR;
@@ -1060,16 +1056,6 @@ function renderLoop() {
     _frameDescriptor.physH = physH;
     _frameDescriptor.candleW = candleW;
     _frameDescriptor.frameStartBar = frameStartBar;
-    _frameDescriptor.tickSize = store.tick_size();
-    _frameDescriptor.basePrice = store.base_price();
-    _frameDescriptor.packedPayloadPtr = store.packed_upload_payload_ptr() >>> 0;
-    _frameDescriptor.packedPayloadLenBytes = store.packed_upload_payload_len_bytes() >>> 0;
-    _frameDescriptor.packedMetaPtr = store.packed_upload_meta_ptr() >>> 0;
-    _frameDescriptor.packedMetaLenBytes = store.packed_upload_meta_len_bytes() >>> 0;
-    _frameDescriptor.packedBlockCount = store.packed_upload_block_count() >>> 0;
-    _frameDescriptor.packedFirstBarOffset = store.packed_upload_first_bar_offset() >>> 0;
-    _frameDescriptor.packedBarCount = store.packed_upload_bar_count() >>> 0;
-    _frameDescriptor.packedFlags = _frameDescriptor.packedBlockCount > 0 ? 1 : 0;
     _writeFrameState(_frameDescriptor);
     const t_wasm_ms = performance.now() - t0_wasm;
     _r64[R_WASM_MS] = _r64[R_WASM_MS] * 0.9 + t_wasm_ms * 0.1;

@@ -21,7 +21,11 @@ import {
   FBUF_OPEN_OFF, FBUF_HIGH_OFF, FBUF_LOW_OFF, FBUF_CLOSE_OFF, FBUF_VOL_OFF,
   FBUF_SMA20_OFF, FBUF_SMA50_OFF, FBUF_SMA100_OFF,
   FBUF_START_BAR, FBUF_VIS_BARS, FBUF_VIEW_LEN, FBUF_CANVAS_W, FBUF_CANVAS_H, FBUF_CANDLE_W,
+  FBUF_TICK_SIZE, FBUF_BASE_PRICE,
   FBUF_PRICE_MIN, FBUF_PRICE_MAX, FBUF_FLAGS,
+  FBUF_PACKED_PAYLOAD_PTR, FBUF_PACKED_PAYLOAD_LEN_BYTES,
+  FBUF_PACKED_META_PTR, FBUF_PACKED_META_LEN_BYTES,
+  FBUF_PACKED_BLOCK_COUNT, FBUF_PACKED_FIRST_BAR_OFFSET, FBUF_PACKED_BAR_COUNT, FBUF_PACKED_FLAGS,
   // indSAB
   INDSAB_HDR_BYTES,
   INDSAB_SEQ_OFF, INDSAB_ARENA_LEN, INDSAB_CMD_COUNT, INDSAB_REVISION,
@@ -33,12 +37,15 @@ import {
   INDSAB_ARENA_OFF,
 } from './shared_protocol.js';
 import {
+  BIT_UNPACK_WGSL,
   CANDLES_AUTO_RENDER_WGSL,
   INDICATOR_BAND_WGSL,
   INDICATOR_HISTOGRAM_WGSL,
   INDICATOR_RENDER_WGSL,
   LINE_THICK_WGSL,
   MINMAX_COMPUTE_WGSL,
+  PACKED_CANDLE_RENDER_WGSL,
+  PACKED_MINMAX_COMPUTE_WGSL,
   SMA_COMPUTE_WGSL,
   VOLUME_PROFILE_WGSL,
   VP_RENDER_WGSL,
@@ -66,6 +73,9 @@ export class GpuRenderer {
 
   // ── Pipelines (lazily created once) ──────────────────────────────────────
   /** @type {GPUComputePipeline|null}  */ minmaxPipeline  = null;
+  /** @type {GPUComputePipeline|null}  */ decodePipeline  = null;
+  /** @type {GPUComputePipeline|null}  */ packedMinmaxPipeline = null;
+  /** @type {GPURenderPipeline|null}   */ packedCandlePipeline = null;
   /** @type {GPURenderPipeline|null}   */ candlePipeline  = null;
   /** @type {GPURenderPipeline|null}   */ linePipeline    = null;
   // EP indicator pipelines — arena-backed
@@ -73,6 +83,9 @@ export class GpuRenderer {
   /** @type {GPURenderPipeline|null}   */ indHistPipeline = null;   // Histogram
   /** @type {GPURenderPipeline|null}   */ indBandPipeline = null;   // Band fill
   /** @type {string} */                  _minmaxWgsl     = '';
+  /** @type {string} */                  _bitUnpackWgsl  = '';
+  /** @type {string} */                  _packedMinmaxWgsl = '';
+  /** @type {string} */                  _packedCandleWgsl = '';
   /** @type {string} */                  _candleWgsl     = '';
   /** @type {string} */                  _lineWgsl       = '';
   /** @type {string} */                  _smaWgsl        = '';
@@ -84,6 +97,14 @@ export class GpuRenderer {
   // ── GPU buffers (lazily allocated, grown on demand) ───────────────────────
   /** @type {GPUBuffer|null} */ storageBuf      = null;   // [open|high|low|close] × viewLen f32
   /** @type {number}         */ storageBufSize  = 0;      // bytes
+  /** @type {GPUBuffer|null} */ packedBuf       = null;   // packed payload upload buffer
+  /** @type {number}         */ packedBufSize   = 0;      // bytes
+  /** @type {GPUBuffer|null} */ packedMetaBuf   = null;   // packed block metadata upload buffer
+  /** @type {number}         */ packedMetaBufSize = 0;    // bytes
+  /** @type {GPUBuffer|null} */ decodeUniBuf    = null;   // decode uniform buffer (future GPU decode path)
+  /** @type {boolean}        */ _packedDecodeEnabled = false;
+  /** @type {boolean}        */ _packedMinmaxPrototypeEnabled = false;
+  /** @type {boolean}        */ _packedCandlePrototypeEnabled = false;
   /** @type {GPUBuffer|null} */ mmBuf           = null;   // 8B: [atomicMax(high), atomicMin(low)]
   /** @type {GPUBuffer|null} */ computeParamBuf = null;   // 16B uniform
   /** @type {GPUBuffer|null} */ candleUniBuf    = null;   // 96B uniform
@@ -124,6 +145,10 @@ export class GpuRenderer {
   _vpRenderDv = new DataView(this._vpRenderUbuf);  // DataView on _vpRenderUbuf
   _indUniBuf = new ArrayBuffer(80);   // EP indicator uniform (80B = max of all shader types)
   _indUniBufDv = new DataView(this._indUniBuf);  // DataView on _indUniBuf
+  _packedMinmaxUbuf = new ArrayBuffer(32);
+  _packedMinmaxUbufDv = new DataView(this._packedMinmaxUbuf);
+  _packedCandleUbuf = new ArrayBuffer(112);  // packed candle uniform (112B)
+  _packedCandleUbufDv = new DataView(this._packedCandleUbuf);
   _cachedLayout = { main: { y: 0, h: 0 }, sub1: { y: 0, h: 0 }, sub2: { y: 0, h: 0 }, gap: 0 };
   _defaultPaneConfig = { gap: 2, main: 7.0, sub1: 1.5, sub2: 1.5, marginBot: 8 };
   _priceRangeOut = [0, 1];
@@ -136,6 +161,15 @@ export class GpuRenderer {
     { binding: 2, resource: { buffer: null } },
   ];
   _compBgDesc = { layout: null, entries: this._compBgEntries };
+  _cachedCompBG = null;
+  _cachedPackedMinmaxBG = null;
+  _cachedCandleBG = null;
+  _cachedVpRenderBg = null;
+  _cachedVpComputeBg = null;
+  _bg0Cache = [];
+  _bg1Cache = [];
+  _arenaGpuBufId = 0;
+  _currentSwapView = null;
   _candleBgEntries = [
     { binding: 0, resource: { buffer: null } },
     { binding: 1, resource: { buffer: null } },
@@ -162,6 +196,22 @@ export class GpuRenderer {
   _indicatorBg0Desc = { layout: null, entries: this._indicatorBg0Entries };
   _indicatorBg1Entries = [{ binding: 0, resource: { buffer: null } }];
   _indicatorBg1Desc = { layout: null, entries: this._indicatorBg1Entries };
+  _packedMinmaxBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+    { binding: 2, resource: { buffer: null } },
+    { binding: 3, resource: { buffer: null } },
+  ];
+  _packedMinmaxBgDesc = { layout: null, entries: this._packedMinmaxBgEntries };
+  _packedCandleBgEntries = [
+    { binding: 0, resource: { buffer: null } },
+    { binding: 1, resource: { buffer: null } },
+    { binding: 2, resource: { buffer: null } },
+    { binding: 3, resource: { buffer: null } },
+  ];
+  _packedCandleBgDesc = { layout: null, entries: this._packedCandleBgEntries };
+  _cachedPackedCandleBG = null;
+  /** @type {GPUBuffer|null} */ packedCandleUniBuf = null;
 
   _clearColor = { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
   _clearPassColorAttachments = [{ view: null, loadOp: 'clear', storeOp: 'store', clearValue: this._clearColor }];
@@ -190,6 +240,16 @@ export class GpuRenderer {
     pmin: 0,
     pmax: 1,
     flags: 0,
+    packedPayloadPtr: 0,
+    packedPayloadLenBytes: 0,
+    packedMetaPtr: 0,
+    packedMetaLenBytes: 0,
+    packedBlockCount: 0,
+    packedFirstBarOffset: 0,
+    packedBarCount: 0,
+    packedFlags: 0,
+    tickSize: 0,
+    basePrice: 0,
   };
 
   _readLegacyFrameParams(fdbHdr) {
@@ -202,13 +262,107 @@ export class GpuRenderer {
     out.pmin = fdbHdr.getFloat32(FBUF_PRICE_MIN, true);
     out.pmax = fdbHdr.getFloat32(FBUF_PRICE_MAX, true);
     out.flags = fdbHdr.getUint32(FBUF_FLAGS, true);
+    out.packedPayloadPtr = fdbHdr.getUint32(FBUF_PACKED_PAYLOAD_PTR, true);
+    out.packedPayloadLenBytes = fdbHdr.getUint32(FBUF_PACKED_PAYLOAD_LEN_BYTES, true);
+    out.packedMetaPtr = fdbHdr.getUint32(FBUF_PACKED_META_PTR, true);
+    out.packedMetaLenBytes = fdbHdr.getUint32(FBUF_PACKED_META_LEN_BYTES, true);
+    out.packedBlockCount = fdbHdr.getUint32(FBUF_PACKED_BLOCK_COUNT, true);
+    out.packedFirstBarOffset = fdbHdr.getUint32(FBUF_PACKED_FIRST_BAR_OFFSET, true);
+    out.packedBarCount = fdbHdr.getUint32(FBUF_PACKED_BAR_COUNT, true);
+    out.packedFlags = fdbHdr.getUint32(FBUF_PACKED_FLAGS, true);
+    out.tickSize = fdbHdr.getFloat32(FBUF_TICK_SIZE, true);
+    out.basePrice = fdbHdr.getFloat32(FBUF_BASE_PRICE, true);
     return out;
+  }
+
+  _hasPackedFrame(frameParams) {
+    return !!(
+      frameParams.packedFlags !== 0
+      && frameParams.packedPayloadPtr > 0
+      && frameParams.packedPayloadLenBytes > 0
+      && frameParams.packedMetaPtr > 0
+      && frameParams.packedMetaLenBytes > 0
+      && frameParams.packedBlockCount > 0
+    );
+  }
+
+  _ensurePackedUploadBuffers(payloadBytes, metaBytes) {
+    const { device } = this;
+    const safePayloadBytes = Math.max(4, payloadBytes);
+    const safeMetaBytes = Math.max(4, metaBytes);
+    if (!this.packedBuf || this.packedBufSize < safePayloadBytes) {
+      this.packedBuf?.destroy();
+      this.packedBuf = device.createBuffer({
+        size: safePayloadBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.packedBufSize = safePayloadBytes;
+      this._cachedPackedMinmaxBG = null;
+      this._cachedPackedCandleBG = null;
+    }
+    if (!this.packedMetaBuf || this.packedMetaBufSize < safeMetaBytes) {
+      this.packedMetaBuf?.destroy();
+      this.packedMetaBuf = device.createBuffer({
+        size: safeMetaBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.packedMetaBufSize = safeMetaBytes;
+      this._cachedPackedMinmaxBG = null;
+      this._cachedPackedCandleBG = null;
+    }
+  }
+
+  _uploadPackedFrame(frameParams) {
+    if (!this._hasPackedFrame(frameParams)) return false;
+    const wasmBuffer = this._fbOpen?.buffer;
+    if (!(wasmBuffer instanceof SharedArrayBuffer || wasmBuffer instanceof ArrayBuffer)) return false;
+    this._ensurePackedUploadBuffers(frameParams.packedPayloadLenBytes, frameParams.packedMetaLenBytes);
+    const queue = this.device.queue;
+    queue.writeBuffer(this.packedBuf, 0, wasmBuffer, frameParams.packedPayloadPtr, frameParams.packedPayloadLenBytes);
+    queue.writeBuffer(this.packedMetaBuf, 0, wasmBuffer, frameParams.packedMetaPtr, frameParams.packedMetaLenBytes);
+    return true;
   }
 
   // Timestamp query resources
   /** @type {GPUQuerySet|null} */ timestampQuerySet = null;
   /** @type {GPUBuffer|null} */ timestampResolveBuf = null;
   /** @type {GPUBuffer|null} */ timestampReadBuf = null;
+  /** @type {boolean} */ _minmaxProfileEnabled = true;
+  /** @type {number} */ _minmaxProfileIntervalMs = 1000;
+  /** @type {number} */ _minmaxProfileLastSampleAt = 0;
+  /** @type {boolean} */ _minmaxProfilePending = false;
+  /** @type {boolean} */ _minmaxProfileNextUsePacked = false;
+  _minmaxProfile = {
+    supported: false,
+    activeMode: 'legacy',
+    lastSampleMode: 'legacy',
+    lastSampleMs: 0,
+    packedMs: 0,
+    legacyMs: 0,
+    packedSamples: 0,
+    legacySamples: 0,
+  };
+  _minmaxTimestampWrites = { querySet: null, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
+  _minmaxProfilePassDesc = { timestampWrites: this._minmaxTimestampWrites };
+
+  // ── Candle pass profiling (packed-direct vs legacy storageBuf path) ─────
+  /** @type {boolean} */ _candleProfileEnabled = true;
+  /** @type {number} */ _candleProfileIntervalMs = 1000;
+  /** @type {number} */ _candleProfileLastSampleAt = 0;
+  /** @type {boolean} */ _candleProfilePending = false;
+  /** @type {boolean} */ _candleProfileNextUsePacked = false;
+  _candleProfile = {
+    supported: false,
+    activeMode: 'legacy',
+    lastSampleMode: 'legacy',
+    lastSampleMs: 0,
+    packedMs: 0,
+    legacyMs: 0,
+    packedSamples: 0,
+    legacySamples: 0,
+  };
+  _candleTimestampWrites = { querySet: null, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
+  _candleProfilePassDesc = { colorAttachments: null, timestampWrites: this._candleTimestampWrites };
 
   // ── Canvas dimensions ─────────────────────────────────────────────────────
   physW = 0;
@@ -240,6 +394,9 @@ export class GpuRenderer {
 
     // WGSL is minified and embedded at build time so worker startup does not depend on runtime fetch.
     this._minmaxWgsl = MINMAX_COMPUTE_WGSL;
+    this._bitUnpackWgsl = BIT_UNPACK_WGSL;
+    this._packedMinmaxWgsl = PACKED_MINMAX_COMPUTE_WGSL;
+    this._packedCandleWgsl = PACKED_CANDLE_RENDER_WGSL;
     this._candleWgsl = CANDLES_AUTO_RENDER_WGSL;
     this._lineWgsl = LINE_THICK_WGSL;
     this._smaWgsl = SMA_COMPUTE_WGSL;
@@ -251,6 +408,9 @@ export class GpuRenderer {
 
     // Create pipelines eagerly so first frame has no jank from lazy init
     this.minmaxPipeline  = this._makeComputePipeline(this._minmaxWgsl);
+    this.decodePipeline  = this._makeComputePipeline(this._bitUnpackWgsl);
+    this.packedMinmaxPipeline = this._makeComputePipeline(this._packedMinmaxWgsl);
+    this.packedCandlePipeline = this._makeRenderPipeline(this._packedCandleWgsl);
     this.candlePipeline  = this._makeRenderPipeline(this._candleWgsl);
     this.linePipeline    = this._makeRenderPipeline(this._lineWgsl);
     // EP indicator pipelines
@@ -268,8 +428,16 @@ export class GpuRenderer {
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    this.decodeUniBuf = this.device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
     this.candleUniBuf = this.device.createBuffer({
       size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.packedCandleUniBuf = this.device.createBuffer({
+      size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.lineUniBuf = this.device.createBuffer({
@@ -342,12 +510,107 @@ export class GpuRenderer {
   initTimestampQuery(capacity) {
     if (!this.device) return false;
     try {
+      const minCap = Math.max(capacity, 4);  // 0-1 minmax, 2-3 candle
       if (!this.device.features || !this.device.features.has('timestamp-query')) return false;
-      this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: capacity });
-      this.timestampResolveBuf = this.device.createBuffer({ size: capacity * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-      this.timestampReadBuf = this.device.createBuffer({ size: capacity * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: minCap });
+      this.timestampResolveBuf = this.device.createBuffer({ size: minCap * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+      this.timestampReadBuf = this.device.createBuffer({ size: minCap * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      this._minmaxTimestampWrites.querySet = this.timestampQuerySet;
+      this._minmaxProfile.supported = true;
+      this._candleTimestampWrites.querySet = this.timestampQuerySet;
+      this._candleTimestampWrites.beginningOfPassWriteIndex = 2;
+      this._candleTimestampWrites.endOfPassWriteIndex = 3;
+      this._candleProfile.supported = true;
       return true;
     } catch (e) { console.warn('[gpu_renderer] initTimestampQuery failed:', e); return false; }
+  }
+
+  _shouldSampleMinmaxProfile(hasPackedFrame) {
+    if (!hasPackedFrame) return false;
+    if (!this._minmaxProfileEnabled) return false;
+    if (!this.timestampQuerySet || this._minmaxProfilePending) return false;
+    if (this._candleProfilePending) return false;  // shared read buffer — mutual exclusion
+    const now = performance.now();
+    if ((now - this._minmaxProfileLastSampleAt) < this._minmaxProfileIntervalMs) return false;
+    this._minmaxProfileLastSampleAt = now;
+    return true;
+  }
+
+  _scheduleMinmaxProfileReadback(sampleMode) {
+    if (!this.timestampQuerySet || this._minmaxProfilePending) return;
+    this._minmaxProfilePending = true;
+    this._minmaxProfile.activeMode = sampleMode;
+    this.resolveTimestampQuery(0, 2);
+    this.getTimestampResults().then((results) => {
+      if (!results || results.length < 2) return;
+      const elapsedTicks = results[1] - results[0];
+      const elapsedMs = Number(elapsedTicks) / 1_000_000;
+      this._minmaxProfile.lastSampleMode = sampleMode;
+      this._minmaxProfile.lastSampleMs = elapsedMs;
+      if (sampleMode === 'packed') {
+        this._minmaxProfile.packedSamples += 1;
+        this._minmaxProfile.packedMs = this._minmaxProfile.packedSamples === 1
+          ? elapsedMs
+          : this._minmaxProfile.packedMs * 0.8 + elapsedMs * 0.2;
+      } else {
+        this._minmaxProfile.legacySamples += 1;
+        this._minmaxProfile.legacyMs = this._minmaxProfile.legacySamples === 1
+          ? elapsedMs
+          : this._minmaxProfile.legacyMs * 0.8 + elapsedMs * 0.2;
+      }
+    }).catch((error) => {
+      console.warn('[gpu_renderer] minmax timestamp readback failed:', error);
+    }).finally(() => {
+      this._minmaxProfilePending = false;
+    });
+  }
+
+  getMinmaxProfileSnapshot() {
+    return this._minmaxProfile;
+  }
+
+  _shouldSampleCandleProfile(hasPackedFrame) {
+    if (!hasPackedFrame) return false;
+    if (!this._candleProfileEnabled) return false;
+    if (!this.timestampQuerySet || this._candleProfilePending) return false;
+    if (this._minmaxProfilePending) return false;  // shared read buffer — mutual exclusion
+    const now = performance.now();
+    if ((now - this._candleProfileLastSampleAt) < this._candleProfileIntervalMs) return false;
+    this._candleProfileLastSampleAt = now;
+    return true;
+  }
+
+  _scheduleCandleProfileReadback(sampleMode) {
+    if (!this.timestampQuerySet || this._candleProfilePending) return;
+    this._candleProfilePending = true;
+    this._candleProfile.activeMode = sampleMode;
+    this.resolveTimestampQuery(2, 2);
+    this.getTimestampResults().then((results) => {
+      if (!results || results.length < 2) return;
+      const elapsedTicks = results[1] - results[0];
+      const elapsedMs = Number(elapsedTicks) / 1_000_000;
+      this._candleProfile.lastSampleMode = sampleMode;
+      this._candleProfile.lastSampleMs = elapsedMs;
+      if (sampleMode === 'packed') {
+        this._candleProfile.packedSamples += 1;
+        this._candleProfile.packedMs = this._candleProfile.packedSamples === 1
+          ? elapsedMs
+          : this._candleProfile.packedMs * 0.8 + elapsedMs * 0.2;
+      } else {
+        this._candleProfile.legacySamples += 1;
+        this._candleProfile.legacyMs = this._candleProfile.legacySamples === 1
+          ? elapsedMs
+          : this._candleProfile.legacyMs * 0.8 + elapsedMs * 0.2;
+      }
+    }).catch((error) => {
+      console.warn('[gpu_renderer] candle timestamp readback failed:', error);
+    }).finally(() => {
+      this._candleProfilePending = false;
+    });
+  }
+
+  getCandleProfileSnapshot() {
+    return this._candleProfile;
   }
 
   /**
@@ -433,6 +696,7 @@ export class GpuRenderer {
       this._priceRangeOut[1] = 1;
       return this._priceRangeOut;
     }
+    this._currentSwapView = this.context.getCurrentTexture().createView();
     const { device } = this;
     const queue = device.queue;
 
@@ -450,6 +714,11 @@ export class GpuRenderer {
     const offsetSlots = viewportShift.extraLeftBars + (viewportShift.panOffsetPx / Math.max(1e-6, slotW));
 
     const DPR = this.dpr;
+
+    const hasPackedFrame = this._hasPackedFrame(frameParams);
+    if ((this._packedDecodeEnabled || this._packedMinmaxPrototypeEnabled) && hasPackedFrame) {
+      this._uploadPackedFrame(frameParams);
+    }
 
     // ── 0. Pane layout (must precede price padding — uses mainH) ─────────
     const paneLayout = this._computePaneLayout(plotH, flags);
@@ -502,7 +771,66 @@ export class GpuRenderer {
     this._cpData[0] = viewLen; this._cpData[1] = 0; this._cpData[2] = viewLen; this._cpData[3] = 0;
     queue.writeBuffer(this.computeParamBuf, 0, this._cpData);
 
+    let usePackedMinmax = this._packedMinmaxPrototypeEnabled && hasPackedFrame;
+    const sampleMinmaxProfile = this._shouldSampleMinmaxProfile(hasPackedFrame);
+    if (sampleMinmaxProfile) {
+      this._minmaxProfileNextUsePacked = !this._minmaxProfileNextUsePacked;
+      usePackedMinmax = this._minmaxProfileNextUsePacked;
+    }
+    const sampledMode = usePackedMinmax ? 'packed' : 'legacy';
+    if (usePackedMinmax) {
+      const packedMinmaxDv = this._packedMinmaxUbufDv;
+      packedMinmaxDv.setUint32(0, frameParams.packedBlockCount, true);
+      packedMinmaxDv.setUint32(4, frameParams.packedFirstBarOffset, true);
+      packedMinmaxDv.setUint32(8, frameParams.packedBarCount, true);
+      packedMinmaxDv.setUint32(12, 0, true);
+      packedMinmaxDv.setFloat32(16, frameParams.tickSize, true);
+      packedMinmaxDv.setFloat32(20, frameParams.basePrice, true);
+      packedMinmaxDv.setFloat32(24, 0, true);
+      packedMinmaxDv.setFloat32(28, 0, true);
+      queue.writeBuffer(this.decodeUniBuf, 0, this._packedMinmaxUbuf);
+    }
+
     // ── 4. Candle uniform buffer (96B) ─────────────────────────────────────
+    // Determine candle pass mode: packed-direct vs legacy (storageBuf)
+    let usePackedCandle = this._packedCandlePrototypeEnabled && hasPackedFrame;
+    const sampleCandleProfile = !sampleMinmaxProfile && this._shouldSampleCandleProfile(hasPackedFrame);
+    if (sampleCandleProfile) {
+      this._candleProfileNextUsePacked = !this._candleProfileNextUsePacked;
+      usePackedCandle = this._candleProfileNextUsePacked;
+    }
+    const candleSampledMode = usePackedCandle ? 'packed' : 'legacy';
+
+    if (usePackedCandle) {
+      // Upload packed candle uniform (112B): layout params + packed decode params
+      const v = this._packedCandleUbufDv;
+      v.setFloat32( 0, plotW,          true);  // pw
+      v.setFloat32( 4, candleW,        true);  // cw
+      v.setUint32 ( 8, frameParams.packedBlockCount, true);  // block_count
+      v.setUint32 (12, frameParams.packedFirstBarOffset, true);  // first_bar_offset
+      v.setUint32 (16, totalSlots,     true);  // visible_count
+      v.setFloat32(20, mainH,          true);  // ph
+      v.setFloat32(24, DPR,            true);  // border_width
+      v.setFloat32(28, offsetSlots,    true);  // offset_slots
+      // bull_color: #00AA00
+      v.setFloat32(32, 0.00, true); v.setFloat32(36, 0.67, true);
+      v.setFloat32(40, 0.00, true); v.setFloat32(44, 1.00, true);
+      // bear_color: #CC3333
+      v.setFloat32(48, 0.80, true); v.setFloat32(52, 0.20, true);
+      v.setFloat32(56, 0.20, true); v.setFloat32(60, 1.00, true);
+      // wick_color: rgba(100,100,100,1)
+      v.setFloat32(64, 0.39, true); v.setFloat32(68, 0.39, true);
+      v.setFloat32(72, 0.39, true); v.setFloat32(76, 1.00, true);
+      // border_color: same as wick
+      v.setFloat32(80, 0.39, true); v.setFloat32(84, 0.39, true);
+      v.setFloat32(88, 0.39, true); v.setFloat32(92, 1.00, true);
+      // packed decode params (offset 96)
+      v.setFloat32(96, frameParams.tickSize,   true);  // price_scale
+      v.setFloat32(100, frameParams.basePrice,  true);  // price_offset
+      v.setFloat32(104, 0, true);                       // _pad0
+      v.setFloat32(108, 0, true);                       // _pad1
+      queue.writeBuffer(this.packedCandleUniBuf, 0, this._packedCandleUbuf);
+    }
     {
       const v = this._candleUbufDv;
       v.setFloat32( 0, plotW,   true);  // pw
@@ -533,40 +861,88 @@ export class GpuRenderer {
 
     // Compute pass: minmax
     {
-      const compBGL = this.minmaxPipeline.getBindGroupLayout(0);
-      this._compBgDesc.layout = compBGL;
-      this._compBgEntries[0].resource.buffer = this.storageBuf;
-      this._compBgEntries[1].resource.buffer = this.mmBuf;
-      this._compBgEntries[2].resource.buffer = this.computeParamBuf;
-      const compBG = device.createBindGroup(this._compBgDesc);
-      const compPass = encoder.beginComputePass();
-      compPass.setPipeline(this.minmaxPipeline);
-      compPass.setBindGroup(0, compBG);
-      compPass.dispatchWorkgroups(Math.ceil(viewLen / 64));
+      if (usePackedMinmax) {
+        if (!this._cachedPackedMinmaxBG) {
+          this._packedMinmaxBgDesc.layout = this.packedMinmaxPipeline.getBindGroupLayout(0);
+          this._packedMinmaxBgEntries[0].resource.buffer = this.decodeUniBuf;
+          this._packedMinmaxBgEntries[1].resource.buffer = this.packedMetaBuf;
+          this._packedMinmaxBgEntries[2].resource.buffer = this.packedBuf;
+          this._packedMinmaxBgEntries[3].resource.buffer = this.mmBuf;
+          this._cachedPackedMinmaxBG = device.createBindGroup(this._packedMinmaxBgDesc);
+        }
+      } else if (!this._cachedCompBG) {
+        this._compBgDesc.layout = this.minmaxPipeline.getBindGroupLayout(0);
+        this._compBgEntries[0].resource.buffer = this.storageBuf;
+        this._compBgEntries[1].resource.buffer = this.mmBuf;
+        this._compBgEntries[2].resource.buffer = this.computeParamBuf;
+        this._cachedCompBG = device.createBindGroup(this._compBgDesc);
+      }
+      const compPass = encoder.beginComputePass(sampleMinmaxProfile ? this._minmaxProfilePassDesc : undefined);
+      if (usePackedMinmax) {
+        compPass.setPipeline(this.packedMinmaxPipeline);
+        compPass.setBindGroup(0, this._cachedPackedMinmaxBG);
+        compPass.dispatchWorkgroups(frameParams.packedBlockCount);
+      } else {
+        compPass.setPipeline(this.minmaxPipeline);
+        compPass.setBindGroup(0, this._cachedCompBG);
+        compPass.dispatchWorkgroups(Math.ceil(viewLen / 64));
+      }
       compPass.end();
     }
 
     // Render pass: candles (clears to background)
     {
-      const candleBGL = this.candlePipeline.getBindGroupLayout(0);
-      this._candleBgDesc.layout = candleBGL;
-      this._candleBgEntries[0].resource.buffer = this.candleUniBuf;
-      this._candleBgEntries[1].resource.buffer = this.storageBuf;
-      this._candleBgEntries[2].resource.buffer = this.mmBuf;
-      const candleBG = device.createBindGroup(this._candleBgDesc);
-      const swapView = this.context.getCurrentTexture().createView();
+      const swapView = this._currentSwapView;
       this._clearPassColorAttachments[0].view = swapView;
-      const renderPass = encoder.beginRenderPass(this._clearPassDesc);
-      // Restrict candle drawing to main pane (sub-pane regions stay cleared to white)
-      if (mainH < plotH) renderPass.setViewport(0, 0, plotW, mainH, 0, 1);
-      renderPass.setPipeline(this.candlePipeline);
-      renderPass.setBindGroup(0, candleBG);
-      renderPass.draw(12, viewLen);  // 12 verts (6 body + 6 wick), viewLen instances
-      renderPass.end();
+
+      if (usePackedCandle) {
+        // Packed-direct candle: reads OHLC from packed blocks, no storageBuf
+        if (!this._cachedPackedCandleBG) {
+          this._packedCandleBgDesc.layout = this.packedCandlePipeline.getBindGroupLayout(0);
+          this._packedCandleBgEntries[0].resource.buffer = this.packedCandleUniBuf;
+          this._packedCandleBgEntries[1].resource.buffer = this.packedMetaBuf;
+          this._packedCandleBgEntries[2].resource.buffer = this.packedBuf;
+          this._packedCandleBgEntries[3].resource.buffer = this.mmBuf;
+          this._cachedPackedCandleBG = device.createBindGroup(this._packedCandleBgDesc);
+        }
+        const passDesc = sampleCandleProfile
+          ? { colorAttachments: this._clearPassDesc.colorAttachments, timestampWrites: this._candleTimestampWrites }
+          : this._clearPassDesc;
+        const renderPass = encoder.beginRenderPass(passDesc);
+        if (mainH < plotH) renderPass.setViewport(0, 0, plotW, mainH, 0, 1);
+        renderPass.setPipeline(this.packedCandlePipeline);
+        renderPass.setBindGroup(0, this._cachedPackedCandleBG);
+        renderPass.draw(12, frameParams.packedBarCount);
+        renderPass.end();
+      } else {
+        // Legacy candle: reads OHLC from storageBuf (f32 SoA)
+        if (!this._cachedCandleBG) {
+          this._candleBgDesc.layout = this.candlePipeline.getBindGroupLayout(0);
+          this._candleBgEntries[0].resource.buffer = this.candleUniBuf;
+          this._candleBgEntries[1].resource.buffer = this.storageBuf;
+          this._candleBgEntries[2].resource.buffer = this.mmBuf;
+          this._cachedCandleBG = device.createBindGroup(this._candleBgDesc);
+        }
+        const passDesc = sampleCandleProfile
+          ? { colorAttachments: this._clearPassDesc.colorAttachments, timestampWrites: this._candleTimestampWrites }
+          : this._clearPassDesc;
+        const renderPass = encoder.beginRenderPass(passDesc);
+        if (mainH < plotH) renderPass.setViewport(0, 0, plotW, mainH, 0, 1);
+        renderPass.setPipeline(this.candlePipeline);
+        renderPass.setBindGroup(0, this._cachedCandleBG);
+        renderPass.draw(12, viewLen);
+        renderPass.end();
+      }
     }
 
     this._submitCmds[0] = encoder.finish();
     queue.submit(this._submitCmds);
+    if (sampleMinmaxProfile) {
+      this._scheduleMinmaxProfileReadback(sampledMode);
+    }
+    if (sampleCandleProfile) {
+      this._scheduleCandleProfileReadback(candleSampledMode);
+    }
 
     // ── 6. Indicator overlays ────────────────────────────────────────────────
     if (this.indSab) {
@@ -623,14 +999,16 @@ export class GpuRenderer {
       queue.writeBuffer(this.lineUniBuf, 0, this._lineUbuf);
     }
 
-    const lineBGL = this.linePipeline.getBindGroupLayout(0);
-    this._lineBgDesc.layout = lineBGL;
-    this._lineBgEntries[0].resource.buffer = this.lineUniBuf;
-    this._lineBgEntries[1].resource.buffer = entry.buf;
-    const lineBG = device.createBindGroup(this._lineBgDesc);
+    if (!entry.bg) {
+      this._lineBgDesc.layout = this.linePipeline.getBindGroupLayout(0);
+      this._lineBgEntries[0].resource.buffer = this.lineUniBuf;
+      this._lineBgEntries[1].resource.buffer = entry.buf;
+      entry.bg = device.createBindGroup(this._lineBgDesc);
+    }
+    const lineBG = entry.bg;
 
     // Current swapchain texture (LoadOp::load — overlay on top of candles)
-    const swapView = this.context.getCurrentTexture().createView();
+    const swapView = this._currentSwapView;
     const encoder  = device.createCommandEncoder();
     this._loadPassColorAttachments[0].view = swapView;
     const pass = encoder.beginRenderPass(this._loadPassDesc);
@@ -669,13 +1047,15 @@ export class GpuRenderer {
     // 40, 44 are pad1, pad2
     queue.writeBuffer(this.vpRenderUniforms, 0, ubuf);
 
-    const bgl = this.vpRenderPipeline.getBindGroupLayout(0);
-    this._vpRenderBgDesc.layout = bgl;
-    this._vpRenderBgEntries[0].resource.buffer = this.vpRenderUniforms;
-    this._vpRenderBgEntries[1].resource.buffer = this.vpBuffer;
-    const bg = device.createBindGroup(this._vpRenderBgDesc);
+    if (!this._cachedVpRenderBg) {
+      this._vpRenderBgDesc.layout = this.vpRenderPipeline.getBindGroupLayout(0);
+      this._vpRenderBgEntries[0].resource.buffer = this.vpRenderUniforms;
+      this._vpRenderBgEntries[1].resource.buffer = this.vpBuffer;
+      this._cachedVpRenderBg = device.createBindGroup(this._vpRenderBgDesc);
+    }
+    const bg = this._cachedVpRenderBg;
 
-    const swapView = this.context.getCurrentTexture().createView();
+    const swapView = this._currentSwapView;
     const encoder = device.createCommandEncoder();
     this._loadPassColorAttachments[0].view = swapView;
     const pass = encoder.beginRenderPass(this._loadPassDesc);
@@ -1044,22 +1424,31 @@ export class GpuRenderer {
     //
     // Bind groups are created per-draw because `layout: 'auto'` pipelines each
     // have their own GPUBindGroupLayout.  The creation cost is negligible.
-    const swapView = this.context.getCurrentTexture().createView();
+    const swapView = this._currentSwapView;
     const encoder  = device.createCommandEncoder();
     this._loadPassColorAttachments[0].view = swapView;
     const pass = encoder.beginRenderPass(this._loadPassDesc);
     for (let di = 0; di < poolIdx; di++) {
       const { pipeline, uniBufIdx, uniSize, drawCount, vpY, vpH } = draws[di];
       const uniBuf = this._uniPool[uniBufIdx];
-      const bgl0   = pipeline.getBindGroupLayout(0);
-      const bgl1   = pipeline.getBindGroupLayout(1);
-      this._indicatorBg0Desc.layout = bgl0;
-      this._indicatorBg0Entries[0].resource.buffer = uniBuf;
-      this._indicatorBg0Entries[0].resource.size = uniSize;
-      const bg0 = device.createBindGroup(this._indicatorBg0Desc);
-      this._indicatorBg1Desc.layout = bgl1;
-      this._indicatorBg1Entries[0].resource.buffer = this.arenaGpuBuf;
-      const bg1 = device.createBindGroup(this._indicatorBg1Desc);
+      let bg0 = pipeline._bg0s?.[uniBufIdx];
+      if (!bg0) {
+        pipeline._bg0s = pipeline._bg0s || [];
+        this._indicatorBg0Desc.layout = pipeline.getBindGroupLayout(0);
+        this._indicatorBg0Entries[0].resource.buffer = uniBuf;
+        this._indicatorBg0Entries[0].resource.size = uniSize;
+        bg0 = device.createBindGroup(this._indicatorBg0Desc);
+        pipeline._bg0s[uniBufIdx] = bg0;
+      }
+      
+      let bg1 = pipeline._bg1s?.get(this.arenaGpuBuf);
+      if (!bg1) {
+        pipeline._bg1s = pipeline._bg1s || new WeakMap();
+        this._indicatorBg1Desc.layout = pipeline.getBindGroupLayout(1);
+        this._indicatorBg1Entries[0].resource.buffer = this.arenaGpuBuf;
+        bg1 = device.createBindGroup(this._indicatorBg1Desc);
+        pipeline._bg1s.set(this.arenaGpuBuf, bg1);
+      }
       pass.setViewport(0, vpY, plotW, vpH, 0, 1);
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, bg0);
@@ -1232,6 +1621,8 @@ export class GpuRenderer {
       // include COPY_DST so we can write zeros via queue.writeBuffer
       // @zero_alloc_allow: Volume profile buffer grows only if a larger bin count is requested.
       this.vpBuffer = device.createBuffer({ size: binBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      this._cachedVpComputeBg = null;
+      this._cachedVpRenderBg = null;
     }
     queue.writeBuffer(this.vpBuffer, 0, this._vpZeroBuf.subarray(0, binCount));
 
@@ -1251,12 +1642,14 @@ export class GpuRenderer {
     queue.writeBuffer(this.vpParamsBuf, 0, pbuf);
 
     const encoder = device.createCommandEncoder();
-    const bgl = this.vpPipeline.getBindGroupLayout(0);
-    this._vpComputeBgDesc.layout = bgl;
-    this._vpComputeBgEntries[0].resource.buffer = this.storageBuf;
-    this._vpComputeBgEntries[1].resource.buffer = this.vpBuffer;
-    this._vpComputeBgEntries[2].resource.buffer = this.vpParamsBuf;
-    const bg = device.createBindGroup(this._vpComputeBgDesc);
+    if (!this._cachedVpComputeBg) {
+      this._vpComputeBgDesc.layout = this.vpPipeline.getBindGroupLayout(0);
+      this._vpComputeBgEntries[0].resource.buffer = this.storageBuf;
+      this._vpComputeBgEntries[1].resource.buffer = this.vpBuffer;
+      this._vpComputeBgEntries[2].resource.buffer = this.vpParamsBuf;
+      this._cachedVpComputeBg = device.createBindGroup(this._vpComputeBgDesc);
+    }
+    const bg = this._cachedVpComputeBg;
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.vpPipeline);
     pass.setBindGroup(0, bg);
@@ -1284,9 +1677,13 @@ export class GpuRenderer {
   /** Clean up all GPU resources. */
   destroy() {
     this.storageBuf?.destroy();
+    this.packedBuf?.destroy();
+    this.packedMetaBuf?.destroy();
+    this.decodeUniBuf?.destroy();
     this.mmBuf?.destroy();
     this.computeParamBuf?.destroy();
     this.candleUniBuf?.destroy();
+    this.packedCandleUniBuf?.destroy();
     this.lineUniBuf?.destroy();
     this.arenaGpuBuf?.destroy();
     for (const buf of this._uniPool) buf.destroy();
