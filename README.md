@@ -1,6 +1,14 @@
 # Mochart
 
-High-performance financial charting library for the web.
+High-performance financial charting library for the web. WebGPU + Rust/WASM. 1M+ bars at 60 fps.
+
+<p align="center">
+  <a href="https://monapochi.github.io/mochart/demo/">
+    <img src="https://img.shields.io/badge/%E2%96%B6%20Live%20Demo-WebGPU%20%2B%20Rust%2FWASM-4f46e5?style=for-the-badge" alt="Live Demo" />
+  </a>
+</p>
+
+> **[→ Open Live Demo](https://monapochi.github.io/mochart/demo/)** — WebGPU-powered candle chart rendering 1M+ OHLCV bars at 60 fps with SMA / EMA / BB / RSI / MACD indicators. Runs entirely in the browser via Rust/WASM data engine.
 
 ## Install
 

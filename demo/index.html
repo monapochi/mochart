@@ -10,8 +10,10 @@
   <meta property="og:description" content="80k bars aiming for ⇀ Zero GC. WebGPU + Rust WASM financial charting.">
 
   <!-- SharedArrayBuffer needs COOP/COEP.
-       GitHub Pages doesn't support custom headers, so we use a service worker. -->
-  <script src="coi-serviceworker.js?v=20260309c"></script>
+       GitHub Pages doesn't support custom headers, so we use a service worker.
+       NOTE: Do NOT add ?v= cache-busting to this src — Chrome throws AbortError
+       when registering a ServiceWorker whose URL contains query params. -->
+  <script src="coi-serviceworker.js"></script>
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
