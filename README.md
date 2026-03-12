@@ -20,24 +20,62 @@ npm install @monasche/mochart
 
 Mochart's data engine and GPU renderer run in a dedicated Worker. You must start it and pass it to `createChart` via the `dataWorker` option — **the chart will not load data without this**.
 
-### Vite / bundler
+The Worker entry point is `@monasche/mochart/worker/data` (resolves to `dist/demo/unifiedWorker.js`).
+Each bundler has a different way to instantiate Workers:
+
+### Vite
 
 ```ts
 import { createChart } from '@monasche/mochart';
 import UnifiedWorker from '@monasche/mochart/worker/data?worker';
+// ?worker tells Vite to bundle this as a separate Worker chunk
 
-const worker = new UnifiedWorker();
+const chart = createChart(document.getElementById('chart')!, {
+  dataWorker: new UnifiedWorker(),
+  width: 960,
+  height: 480,
+});
+```
+
+### webpack 5 / rspack
+
+```ts
+import { createChart } from '@monasche/mochart';
+
+// webpack 5 / rspack recognizes new Worker(new URL(..., import.meta.url))
+// and automatically creates a separate Worker chunk.
+const worker = new Worker(
+  new URL('@monasche/mochart/worker/data', import.meta.url),
+  { type: 'module' }
+);
 
 const chart = createChart(document.getElementById('chart')!, {
   dataWorker: worker,
   width: 960,
   height: 480,
 });
-
-chart.setDataUrl('./MSFT.bin');   // or chart.setData(ohlcvArray)
 ```
 
-> The `?worker` suffix is Vite's syntax. For webpack/rspack use `new Worker(new URL('@monasche/mochart/worker/data', import.meta.url))`.
+### Rollup / Rollup-based (Astro, SvelteKit, etc.)
+
+Use the [`@rollup/plugin-url`](https://github.com/rollup/plugins/tree/master/packages/url) or [`rollup-plugin-web-worker-loader`](https://github.com/darionco/rollup-plugin-web-worker-loader), or use the same `new URL` pattern:
+
+```ts
+const worker = new Worker(
+  new URL('@monasche/mochart/worker/data', import.meta.url),
+  { type: 'module' }
+);
+```
+
+### esbuild
+
+esbuild does not natively bundle Workers from `new URL`. Reference the pre-built file directly and copy it to your output directory:
+
+```ts
+// Copy node_modules/@monasche/mochart/dist/demo/unifiedWorker.js
+// to your public/output directory, then:
+const worker = new Worker('/assets/unifiedWorker.js', { type: 'module' });
+```
 
 ### Vanilla (no bundler)
 
