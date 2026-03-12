@@ -26,11 +26,11 @@ import {
 const WORKER_BUILD_VERSION = '20260311a';
 const WASM_GLUE_VERSION = '20260311a';
 const WASM_MODULE_PATHS = [
-  `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
+  `./pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new.js?v=${WASM_GLUE_VERSION}`,
 ];
 const WASM_BINARY_PATHS = [
-  `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
+  `./pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
   `../pkg/mochart_wasm_new_bg.wasm?v=${WASM_GLUE_VERSION}`,
 ];
 const WASM_MODULE_PATHS_SHARED = [
@@ -1362,7 +1362,7 @@ self.onmessage = async (evt) => {
       store = new WasmModule.OhlcvStore(0.01, 100.0, 64, 1024);
       totalBars = 0;
     } else {
-      const next = await loadBinaryOhlcv('../MSFT.bin');
+      const next = await loadBinaryOhlcv('./MSFT.bin');
       store = next.store;
       totalBars = next.barCount;
     }
