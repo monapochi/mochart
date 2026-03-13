@@ -9,6 +9,16 @@
   <meta property="og:title" content="Mochart — ⇀ Zero GC.">
   <meta property="og:description" content="80k bars aiming for ⇀ Zero GC. WebGPU + Rust WASM financial charting.">
 
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-GRPE4F403G" crossorigin="anonymous"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-GRPE4F403G');
+  </script>
+
   <!-- SharedArrayBuffer needs COOP/COEP.
        GitHub Pages doesn't support custom headers, so we use a service worker.
        NOTE: Do NOT add ?v= cache-busting to this src — Chrome throws AbortError
