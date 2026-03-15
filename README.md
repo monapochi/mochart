@@ -10,6 +10,31 @@ High-performance financial charting library for the web. WebGPU + Rust/WASM. 1M+
 
 > **[→ Open Live Demo](https://monapochi.github.io/mochart/demo/)** — WebGPU-powered candle chart rendering 1M+ OHLCV bars at 60 fps with SMA / EMA / BB / RSI / MACD indicators. Runs entirely in the browser via Rust/WASM data engine.
 
+---
+
+There are already many excellent charting libraries out there that are polished, well-documented, and easy to drop in — so first of all, **thank you** for even taking the time to look at this one.
+
+Mochart is something different. It's built for people who enjoy squeezing every last cycle out of the machine: raw WebGPU draw calls, Rust/WASM data kernels, zero-copy `SharedArrayBuffer` pipelines, and hand-tuned WGSL shaders. It is not trying to be the easiest chart library. It is trying to be the fastest.
+
+That said — it's still early. There are known issues. Setup is genuinely non-trivial. If you're the kind of old-school hacker who gets excited about raw GPU pipelines, hand-rolled WASM kernels, and pushing the browser to its absolute limits, you're very welcome to try it. Pull requests and bug reports are always appreciated.
+
+For everyone else: nothing wrong with picking something battle-tested. Come back in a few versions.
+
+---
+
+> ⚠️ **Alpha stage — Setup is non-trivial**
+>
+> Mochart is currently in **early alpha**. Integration requires several steps beyond a simple `npm install`:
+>
+> - **WebGPU browser requirement**: Chrome 113+ / Edge 113+ / Safari 18+ (macOS/iOS) required. Firefox does not yet support WebGPU in stable releases.
+> - **Worker instantiation**: The chart's GPU renderer and data engine run inside a Web Worker. You must instantiate and pass the Worker explicitly — the bundler setup differs per tool (Vite, webpack, Rollup, esbuild). See [Worker Setup](#worker-setup) below.
+> - **Cross-origin isolation (COOP/COEP)**: `SharedArrayBuffer` is required for zero-copy data transfer. Your server must send `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers — or you must integrate a Service Worker shim. This can break third-party scripts (ads, analytics, OAuth popups) that rely on cross-origin access.
+> - **WASM asset serving**: `.wasm` files must be served with `Content-Type: application/wasm` for streaming instantiation. Some dev servers (e.g. Vite without config) fall back to `ArrayBuffer` mode with a console warning.
+>
+> **Recommendation**: Think of Mochart at this stage as a racing car — it is fast, but rough around the edges and not yet road-legal. It is best suited for experimental projects and technical evaluation. If you need something stable for production today, please check back in a few versions.
+
+---
+
 ## Install
 
 ```bash
@@ -18,7 +43,7 @@ npm install @monasche/mochart
 
 ## Worker Setup
 
-Mochart's data engine and GPU renderer run in a dedicated Worker. You must start it and pass it to `createChart` via the `dataWorker` option — **the chart will not load data without this**.
+Mochart's data engine and GPU renderer run in a dedicated Worker. You must start it and pass it to `createChart` via the `worker` option — **the chart will not load data without this**.
 
 The Worker entry point is `@monasche/mochart/worker/data` (resolves to `dist/demo/unifiedWorker.js`).
 Each bundler has a different way to instantiate Workers.
@@ -34,7 +59,7 @@ import UnifiedWorker from '@monasche/mochart/worker/data?worker';
 // ?worker tells Vite to bundle this as a separate Worker chunk
 
 const chart = createChart(document.getElementById('chart')!, {
-  dataWorker: new UnifiedWorker(),
+  worker: new UnifiedWorker(),
   width: 960,
   height: 480,
 });
@@ -53,7 +78,7 @@ const worker = new Worker(
 );
 
 const chart = createChart(document.getElementById('chart')!, {
-  dataWorker: worker,
+  worker: worker,
   width: 960,
   height: 480,
 });
@@ -92,7 +117,7 @@ const worker = new Worker('/assets/unifiedWorker.js', { type: 'module' });
   );
 
   const chart = createChart(document.getElementById('chart'), {
-    dataWorker: worker,
+    worker: worker,
     width: 960,
     height: 480,
   });
@@ -114,8 +139,11 @@ const chart = createChart(document.getElementById('chart')!, {
   width: 960,
   height: 480,
   visibleBars: 120,
+  symbol: 'AAPL',   // optional — displayed in top-left corner of the chart
 });
 ```
+
+> **`symbol` is optional.** If omitted, no ticker label is shown. Pass any string to display it.
 
 ## Data Format
 
