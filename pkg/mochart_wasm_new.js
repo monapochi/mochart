@@ -607,6 +607,13 @@ export class OhlcvStore {
         wasm.ohlcvstore_free_view_buffers(this.__wbg_ptr);
     }
     /**
+     * @returns {boolean}
+     */
+    has_packed_blocks() {
+        const ret = wasm.ohlcvstore_has_packed_blocks(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * indicator_buf の有効要素数（view_len と一致）
      * @returns {number}
      */
@@ -721,6 +728,62 @@ export class OhlcvStore {
         return this;
     }
     /**
+     * @returns {number}
+     */
+    packed_block_count() {
+        const ret = wasm.ohlcvstore_packed_block_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_bar_count() {
+        const ret = wasm.ohlcvstore_packed_upload_bar_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_block_count() {
+        const ret = wasm.ohlcvstore_packed_upload_block_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_first_bar_offset() {
+        const ret = wasm.ohlcvstore_packed_upload_first_bar_offset(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_meta_len_bytes() {
+        const ret = wasm.ohlcvstore_packed_upload_meta_len_bytes(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_meta_ptr() {
+        const ret = wasm.ohlcvstore_packed_upload_meta_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_payload_len_bytes() {
+        const ret = wasm.ohlcvstore_packed_upload_payload_len_bytes(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    packed_upload_payload_ptr() {
+        const ret = wasm.ohlcvstore_packed_upload_payload_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * FDB (Frame Descriptor Buffer) のスロット 0 に現在のフレーム情報を書き込む。
      *
      * `decompress_view_window()` の**直後**に呼び出すこと。
@@ -742,6 +805,27 @@ export class OhlcvStore {
      */
     prepare_frame(canvas_w, canvas_h, candle_w, flags) {
         wasm.ohlcvstore_prepare_frame(this.__wbg_ptr, canvas_w, canvas_h, candle_w, flags);
+    }
+    /**
+     * Prepare metadata and payload slice for a visible viewport upload.
+     *
+     * Metadata is serialized into a reusable scratch buffer. Payload is not
+     * copied; JS receives a pointer directly into the contiguous packed store.
+     * @param {number} start
+     * @param {number} count
+     */
+    prepare_packed_upload(start, count) {
+        wasm.ohlcvstore_prepare_packed_upload(this.__wbg_ptr, start, count);
+    }
+    /**
+     * Rebuild block-pack storage from the existing delta-delta columns.
+     *
+     * This runs outside the frame hot path. Visible payload uploads reuse a
+     * slice of `packed_payload_words`, so once capacity is warmed up there is
+     * no per-frame payload allocation on the Rust side.
+     */
+    rebuild_packed_blocks() {
+        wasm.ohlcvstore_rebuild_packed_blocks(this.__wbg_ptr);
     }
     /**
      * @returns {number}
@@ -768,7 +852,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -911,7 +995,7 @@ export function init_winit_canvas(canvas_id) {
  * @param {number} kind
  */
 export function overlay_add_kind(kind) {
-    wasm.mochart_overlay_add_kind(kind);
+    wasm.overlay_add_kind(kind);
 }
 
 /**
@@ -931,7 +1015,7 @@ export function overlay_kind_mask(marker_count, hline_count, zone_count, text_co
  * @returns {number}
  */
 export function overlay_pack_state_std430_ptr() {
-    const ret = wasm.mochart_overlay_pack_state_std430();
+    const ret = wasm.overlay_pack_state_std430_ptr();
     return ret >>> 0;
 }
 
@@ -944,7 +1028,7 @@ export function overlay_pack_state_std430_ptr() {
  * @returns {number}
  */
 export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count) {
-    const ret = wasm.mochart_overlay_pack_std430(marker_count, hline_count, zone_count, text_count, event_count);
+    const ret = wasm.overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count);
     return ret >>> 0;
 }
 
@@ -952,18 +1036,18 @@ export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, t
  * @param {number} kind
  */
 export function overlay_remove_kind(kind) {
-    wasm.mochart_overlay_remove_kind(kind);
+    wasm.overlay_remove_kind(kind);
 }
 
 export function overlay_reset_state() {
-    wasm.mochart_overlay_reset_state();
+    wasm.overlay_reset_state();
 }
 
 /**
  * @returns {number}
  */
 export function overlay_std430_layout_align() {
-    const ret = wasm.mochart_overlay_std430_layout_align();
+    const ret = wasm.overlay_std430_layout_align();
     return ret >>> 0;
 }
 
@@ -971,7 +1055,7 @@ export function overlay_std430_layout_align() {
  * @returns {number}
  */
 export function overlay_std430_layout_bytes() {
-    const ret = wasm.mochart_overlay_std430_layout_bytes();
+    const ret = wasm.overlay_std430_layout_bytes();
     return ret >>> 0;
 }
 
@@ -979,7 +1063,7 @@ export function overlay_std430_layout_bytes() {
  * @returns {number}
  */
 export function overlay_std430_ptr() {
-    const ret = wasm.mochart_overlay_std430_ptr();
+    const ret = wasm.overlay_std430_ptr();
     return ret >>> 0;
 }
 
@@ -1001,7 +1085,7 @@ export function overlay_total_count(marker_count, hline_count, zone_count, text_
  * @param {number} next_kind
  */
 export function overlay_update_kind(prev_kind, next_kind) {
-    wasm.mochart_overlay_update_kind(prev_kind, next_kind);
+    wasm.overlay_update_kind(prev_kind, next_kind);
 }
 
 function __wbg_get_imports() {
@@ -1258,8 +1342,7 @@ async function __wbg_load(module, imports) {
                 const validResponse = module.ok && expectedResponseType(module.type);
 
                 if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
-                    console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
-
+                    // silent fallback — MIME type mismatch handled by instantiate below
                 } else { throw e; }
             }
         }
