@@ -440,11 +440,13 @@
       width: 20px; height: 20px;
     }
 
-    /* loading overlay */
+    /* loading overlay — scoped to #chart-host so LP text/nav are visible immediately.
+       position: absolute is contained by #chart-host (position: absolute; inset: 0).
+       z-index: 1 keeps it below #hero-header (z-index: 10) siblings. */
     #loading-overlay {
-      position: fixed;
+      position: absolute;
       inset: 0;
-      z-index: 100;
+      z-index: 1;
       background: var(--bg);
       display: flex;
       flex-direction: column;
@@ -492,17 +494,17 @@
 </head>
 <body>
 
-<!-- ────────────────────── Loading overlay ──────────────────────────────── -->
-<div id="loading-overlay">
-  <p class="loader-brand">MO<span>CHART</span></p>
-  <div class="loader-bar-outer"><div class="loader-bar-inner" id="loader-bar"></div></div>
-  <p class="loader-msg">Initializing Rust WASM + WebGPU…</p>
-  <p id="loader-count"></p>
-</div>
-
 <!-- ────────────────────── HERO ──────────────────────────────────────────── -->
 <div id="hero">
-  <div id="chart-host" aria-hidden="true"></div>
+  <!-- loading overlay is inside chart-host so hero text/nav remain visible during init -->
+  <div id="chart-host" aria-hidden="true">
+    <div id="loading-overlay">
+      <p class="loader-brand">MO<span>CHART</span></p>
+      <div class="loader-bar-outer"><div class="loader-bar-inner" id="loader-bar"></div></div>
+      <p class="loader-msg">Initializing Rust WASM + WebGPU…</p>
+      <p id="loader-count"></p>
+    </div>
+  </div>
 
   <header id="hero-header">
     <span class="brand">MO<span>CHART</span></span>
