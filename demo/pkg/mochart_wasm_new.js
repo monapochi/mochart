@@ -260,6 +260,14 @@ export class ExecutionPlan {
         return ret >>> 0;
     }
     /**
+     * Reset all per-slot visibility bitmasks to 0 (always visible).
+     *
+     * Call before a `compile()` / `initExecPlan()` to clear stale masks.
+     */
+    clear_slot_flag_masks() {
+        wasm.executionplan_clear_slot_flag_masks(this.__wbg_ptr);
+    }
+    /**
      * Compile the execution plan for `visible_count` visible bars.
      *
      * This is an O(N) operation (N = slot count) and must be called:
@@ -278,11 +286,37 @@ export class ExecutionPlan {
      *
      * **Zero per-frame allocation**: scratch buffers are grown only when
      * `visible_count` or `period` increases (amortised O(1)).
+     *
+     * ## Phase 1-2/1-3: Incremental Skip
+     *
+     * If the dirty range from `store` does not overlap the current view window
+     * AND all indicator slots already have valid cached arena data, this function
+     * returns early without any computation.  This eliminates the ~8μs indicator
+     * cost on stale frames (mouse hover, no pan/zoom/append).
+     *
+     * "No dirty range" condition: `store.dirty_start_idx() >= store.dirty_end_idx()`.
+     * "All valid" condition: `cache_valid_ep == all_slots_valid_mask()`.
+     *
+     * ## Memory mechanics
+     * The early-exit path costs: 3 comparisons + 1 u32 write to FDB = ~5 ns.
+     * No branches in the hot inner loop are added when recompute IS needed.
      * @param {OhlcvStore} store
      */
     execute(store) {
         _assertClass(store, OhlcvStore);
         wasm.executionplan_execute(this.__wbg_ptr, store.__wbg_ptr);
+    }
+    /**
+     * Returns `true` if the last call to `execute()` exited via the incremental
+     * skip path (no dirty range in the view window + all slots already valid).
+     *
+     * JS checks this after each `execute()` call to decide whether to skip the
+     * arena copy from WASM memory to IndSAB (`_dstArena.set()`).
+     * @returns {boolean}
+     */
+    last_execute_skipped() {
+        const ret = wasm.executionplan_last_execute_skipped(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * Whether `compile(new_visible_count)` must be re-run.
@@ -469,12 +503,68 @@ export class ExecutionPlan {
         wasm.executionplan_set_macd_params(this.__wbg_ptr, slot_id, fast, slow, signal);
     }
     /**
+     * Set the visibility bitmask for one indicator slot.
+     *
+     * An indicator contributes to pane-layout scan only when
+     * `flags & mask != 0`, or when `mask == 0` (always visible).
+     *
+     * Mirrors `slotFlagMask[slot_id]` in `unified_worker.js`.
+     * @param {number} slot_id
+     * @param {number} mask
+     */
+    set_slot_flag_mask(slot_id, mask) {
+        wasm.executionplan_set_slot_flag_mask(this.__wbg_ptr, slot_id, mask);
+    }
+    /**
      * Number of logical indicator slots (not output slots).
      * @returns {number}
      */
     slot_count() {
         const ret = wasm.executionplan_slot_count(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Compute pane layout, price padding, and `offset_slots`; write to FDB bytes 88–127.
+     *
+     * **Call order**: Must be called **after** `execute()` (so `render_cmds[].bar_count`
+     * reflects the current visible window).
+     *
+     * **Zero-allocation**: All computation is on-stack. No heap operations.
+     *
+     * The ten `f32` values written are consumed on the JS side via
+     * `DataView.getFloat32(offset, littleEndian=true)` at the offsets
+     * defined in `layout.rs` (`FDB_PADDED_PMIN` … `FDB_PANE_GAP_PX`).
+     *
+     * # Parameters
+     * - `plot_h`: physical canvas height (px)
+     * - `gap_css`: inter-pane gap in CSS logical pixels
+     * - `margin_bot_css`: bottom margin in CSS logical pixels
+     * - `dpr`: device pixel ratio
+     * - `w_main / w_sub1 / w_sub2`: pane weight ratios (e.g. 3.0 / 1.0 / 1.0)
+     * - `plot_w`: physical canvas width used for `offset_slots` denominator
+     *   (must match the unit of `pan_offset_px` divided by slot width in the GPU renderer)
+     * - `total_slots`: `visibleBars + rightMarginBars`
+     * - `extra_left_bars`: `max(0, startBar − frameStartBar)` (whole-bar pan)
+     * - `pan_offset_px`: subpixel pan remainder (same units as `plot_w / total_slots`)
+     * - `price_min / price_max`: raw (un-padded) price range from the store scan
+     * - `flags`: indicator visibility bitmask
+     * @param {number} plot_h
+     * @param {number} gap_css
+     * @param {number} margin_bot_css
+     * @param {number} dpr
+     * @param {number} w_main
+     * @param {number} w_sub1
+     * @param {number} w_sub2
+     * @param {number} plot_w
+     * @param {number} total_slots
+     * @param {number} extra_left_bars
+     * @param {number} pan_offset_px
+     * @param {number} price_min
+     * @param {number} price_max
+     * @param {number} flags
+     */
+    write_layout_to_fdb(plot_h, gap_css, margin_bot_css, dpr, w_main, w_sub1, w_sub2, plot_w, total_slots, extra_left_bars, pan_offset_px, price_min, price_max, flags) {
+        wasm.executionplan_write_layout_to_fdb(this.__wbg_ptr, plot_h, gap_css, margin_bot_css, dpr, w_main, w_sub1, w_sub2, plot_w, total_slots, extra_left_bars, pan_offset_px, price_min, price_max, flags);
     }
 }
 if (Symbol.dispose) ExecutionPlan.prototype[Symbol.dispose] = ExecutionPlan.prototype.free;
@@ -509,6 +599,28 @@ export class OhlcvStore {
      */
     commit_ingestion(count) {
         wasm.ohlcvstore_commit_ingestion(this.__wbg_ptr, count);
+    }
+    /**
+     * WASM ヒープの footprint を最小化する。
+     *
+     * 初回データロード完了後（`free_ingest_buffers()` 直後）に 1 回だけ呼ぶ。
+     * capacity-doubling 戦略で生じた余剰スロットを即時解放し、
+     * CPU キャッシュの有効利用面積を増やす。
+     *
+     * ## Memory mechanics
+     * - `packed_blocks.shrink_to_fit()`: Vec 倍増で生じた余剰を解放。
+     *   1M bars / bs=1024 → ~1000 ブロック → capacity ~1024 → ~24 スロット節約。
+     * - `blocks.shrink_to_fit()`: BlockSnapshot の余剰を解放。
+     * - `push_buf_*` はコンストラクタで `Vec::with_capacity(block_size)` 済み。
+     *   今後の append に備えて容量を維持するため、ここでは変更しない。
+     * - `decomp_scratch` は hot-path pre-allocated バッファ — 変更しない。
+     *
+     * ## Zero-Allocation
+     * `shrink_to_fit` 自体はシステムアロケータへの dealloc のみで、
+     * 新たな alloc は発生しない。
+     */
+    compact() {
+        wasm.ohlcvstore_compact(this.__wbg_ptr);
     }
     /**
      * View Window の close に対して EMA を計算し、indicator_buf に格納する。
@@ -574,6 +686,24 @@ export class OhlcvStore {
         wasm.ohlcvstore_decompress_view_window(this.__wbg_ptr, start, count);
     }
     /**
+     * One-past-the-end dirty bar index (exclusive, absolute).
+     * See `dirty_start()`.
+     * @returns {number}
+     */
+    dirty_end() {
+        const ret = wasm.ohlcvstore_dirty_end(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * First bar index (absolute) that changed since the last frame.
+     * `dirty_start() >= dirty_end()` → no dirty bars → GPU upload can be skipped.
+     * @returns {number}
+     */
+    dirty_start() {
+        const ret = wasm.ohlcvstore_dirty_start(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Ingestion staging buffers を解放する。
      *
      * `commit_ingestion()` の完了後、ingest_* は quantized columns に
@@ -607,11 +737,59 @@ export class OhlcvStore {
         wasm.ohlcvstore_free_view_buffers(this.__wbg_ptr);
     }
     /**
-     * @returns {boolean}
+     * Number of GpuBlockMeta entries currently in `gpu_meta_buf`.
+     * Used by JS to determine dispatch_x for gpu_decomp.wgsl.
+     * @returns {number}
      */
-    has_packed_blocks() {
-        const ret = wasm.ohlcvstore_has_packed_blocks(this.__wbg_ptr);
-        return ret !== 0;
+    gpu_block_count() {
+        const ret = wasm.ohlcvstore_gpu_block_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Fill `gpu_meta_buf` and `gpu_words_buf` with the compressed block data
+     * that cover the current view window (`view_start..view_start+view_len`).
+     *
+     * Only complete packed blocks (not the partial `push_buf`) are included.
+     * The partial push_buf is handled by the CPU path even in GPU mode.
+     *
+     * ## Zero-Allocation Note
+     * Both buffers grow amortised (capacity doubling). No allocation occurs when
+     * the same capacity is reused across frames.
+     */
+    gpu_fill_view_blocks() {
+        wasm.ohlcvstore_gpu_fill_view_blocks(this.__wbg_ptr);
+    }
+    /**
+     * WASM linear-memory pointer to `gpu_meta_buf[0]`.
+     * @returns {number}
+     */
+    gpu_meta_ptr() {
+        const ret = wasm.ohlcvstore_gpu_meta_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of u32 words in `gpu_meta_buf` (= `gpu_block_count() * GPU_META_STRIDE`).
+     * @returns {number}
+     */
+    gpu_meta_u32_count() {
+        const ret = wasm.ohlcvstore_gpu_meta_u32_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * WASM linear-memory pointer to `gpu_words_buf[0]`.
+     * @returns {number}
+     */
+    gpu_words_ptr() {
+        const ret = wasm.ohlcvstore_gpu_words_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Number of u32 words in `gpu_words_buf` (total packed_words across all view blocks).
+     * @returns {number}
+     */
+    gpu_words_u32_count() {
+        const ret = wasm.ohlcvstore_gpu_words_u32_count(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * indicator_buf の有効要素数（view_len と一致）
@@ -728,62 +906,6 @@ export class OhlcvStore {
         return this;
     }
     /**
-     * @returns {number}
-     */
-    packed_block_count() {
-        const ret = wasm.ohlcvstore_packed_block_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_bar_count() {
-        const ret = wasm.ohlcvstore_packed_upload_bar_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_block_count() {
-        const ret = wasm.ohlcvstore_packed_upload_block_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_first_bar_offset() {
-        const ret = wasm.ohlcvstore_packed_upload_first_bar_offset(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_meta_len_bytes() {
-        const ret = wasm.ohlcvstore_packed_upload_meta_len_bytes(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_meta_ptr() {
-        const ret = wasm.ohlcvstore_packed_upload_meta_ptr(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_payload_len_bytes() {
-        const ret = wasm.ohlcvstore_packed_upload_payload_len_bytes(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    packed_upload_payload_ptr() {
-        const ret = wasm.ohlcvstore_packed_upload_payload_ptr(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
      * FDB (Frame Descriptor Buffer) のスロット 0 に現在のフレーム情報を書き込む。
      *
      * `decompress_view_window()` の**直後**に呼び出すこと。
@@ -805,27 +927,6 @@ export class OhlcvStore {
      */
     prepare_frame(canvas_w, canvas_h, candle_w, flags) {
         wasm.ohlcvstore_prepare_frame(this.__wbg_ptr, canvas_w, canvas_h, candle_w, flags);
-    }
-    /**
-     * Prepare metadata and payload slice for a visible viewport upload.
-     *
-     * Metadata is serialized into a reusable scratch buffer. Payload is not
-     * copied; JS receives a pointer directly into the contiguous packed store.
-     * @param {number} start
-     * @param {number} count
-     */
-    prepare_packed_upload(start, count) {
-        wasm.ohlcvstore_prepare_packed_upload(this.__wbg_ptr, start, count);
-    }
-    /**
-     * Rebuild block-pack storage from the existing delta-delta columns.
-     *
-     * This runs outside the frame hot path. Visible payload uploads reuse a
-     * slice of `packed_payload_words`, so once capacity is warmed up there is
-     * no per-frame payload allocation on the Rust side.
-     */
-    rebuild_packed_blocks() {
-        wasm.ohlcvstore_rebuild_packed_blocks(this.__wbg_ptr);
     }
     /**
      * @returns {number}
@@ -852,7 +953,7 @@ export class OhlcvStore {
      * @returns {number}
      */
     view_len() {
-        const ret = wasm.ohlcvstore_view_len(this.__wbg_ptr);
+        const ret = wasm.ohlcvstore_indicator_len(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -995,7 +1096,7 @@ export function init_winit_canvas(canvas_id) {
  * @param {number} kind
  */
 export function overlay_add_kind(kind) {
-    wasm.overlay_add_kind(kind);
+    wasm.mochart_overlay_add_kind(kind);
 }
 
 /**
@@ -1015,7 +1116,7 @@ export function overlay_kind_mask(marker_count, hline_count, zone_count, text_co
  * @returns {number}
  */
 export function overlay_pack_state_std430_ptr() {
-    const ret = wasm.overlay_pack_state_std430_ptr();
+    const ret = wasm.mochart_overlay_pack_state_std430();
     return ret >>> 0;
 }
 
@@ -1028,7 +1129,7 @@ export function overlay_pack_state_std430_ptr() {
  * @returns {number}
  */
 export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count) {
-    const ret = wasm.overlay_pack_std430_ptr(marker_count, hline_count, zone_count, text_count, event_count);
+    const ret = wasm.mochart_overlay_pack_std430(marker_count, hline_count, zone_count, text_count, event_count);
     return ret >>> 0;
 }
 
@@ -1036,18 +1137,18 @@ export function overlay_pack_std430_ptr(marker_count, hline_count, zone_count, t
  * @param {number} kind
  */
 export function overlay_remove_kind(kind) {
-    wasm.overlay_remove_kind(kind);
+    wasm.mochart_overlay_remove_kind(kind);
 }
 
 export function overlay_reset_state() {
-    wasm.overlay_reset_state();
+    wasm.mochart_overlay_reset_state();
 }
 
 /**
  * @returns {number}
  */
 export function overlay_std430_layout_align() {
-    const ret = wasm.overlay_std430_layout_align();
+    const ret = wasm.mochart_overlay_std430_layout_align();
     return ret >>> 0;
 }
 
@@ -1055,7 +1156,7 @@ export function overlay_std430_layout_align() {
  * @returns {number}
  */
 export function overlay_std430_layout_bytes() {
-    const ret = wasm.overlay_std430_layout_bytes();
+    const ret = wasm.mochart_overlay_std430_layout_bytes();
     return ret >>> 0;
 }
 
@@ -1063,7 +1164,7 @@ export function overlay_std430_layout_bytes() {
  * @returns {number}
  */
 export function overlay_std430_ptr() {
-    const ret = wasm.overlay_std430_ptr();
+    const ret = wasm.mochart_overlay_std430_ptr();
     return ret >>> 0;
 }
 
@@ -1085,7 +1186,68 @@ export function overlay_total_count(marker_count, hline_count, zone_count, text_
  * @param {number} next_kind
  */
 export function overlay_update_kind(prev_kind, next_kind) {
-    wasm.overlay_update_kind(prev_kind, next_kind);
+    wasm.mochart_overlay_update_kind(prev_kind, next_kind);
+}
+
+/**
+ * Map a screen X (CSS px) to a **local bar index** (0-based, clamped to view buffer).
+ *
+ * Equivalent to the JS crosshair formula:
+ * ```text
+ * const barStep = (plotW - 60) / totalSlots;
+ * const offsetSlots = (startBar - frameStartBar) + panOffsetPx / barStep;
+ * const lIdx = clamp(floor(x / barStep + offsetSlots), 0, viewLen-1);
+ * ```
+ *
+ * # Zero-Allocation
+ * Pure stack arithmetic. No heap ops at any call site.
+ *
+ * # Parameters
+ * - `x_css`: pointer X in CSS logical pixels
+ * - `chart_area_w_css`: chart canvas width minus price axis in CSS px (`plotW - 60`)
+ * - `total_slots`: `visBars + rightMarginBars`
+ * - `extra_left_bars`: `max(0, startBar - frameStartBar)`
+ * - `pan_offset_px_css`: sub-pixel pan remainder in CSS px (`SUBPIXEL_PAN_X`)
+ * - `view_len`: length of the view buffer
+ * @param {number} x_css
+ * @param {number} chart_area_w_css
+ * @param {number} total_slots
+ * @param {number} extra_left_bars
+ * @param {number} pan_offset_px_css
+ * @param {number} view_len
+ * @returns {number}
+ */
+export function screen_x_to_local_bar_index(x_css, chart_area_w_css, total_slots, extra_left_bars, pan_offset_px_css, view_len) {
+    const ret = wasm.screen_x_to_local_bar_index(x_css, chart_area_w_css, total_slots, extra_left_bars, pan_offset_px_css, view_len);
+    return ret >>> 0;
+}
+
+/**
+ * Map a screen Y (CSS px) inside the main pane to a **price value**.
+ *
+ * Equivalent to the JS formula:
+ * ```text
+ * const price = pMax - ((y - boundY) / Math.max(1, boundH)) * (pMax - pMin);
+ * ```
+ *
+ * # Zero-Allocation
+ * Pure stack arithmetic. No heap ops at any call site.
+ *
+ * # Parameters
+ * - `y_css`: pointer Y in CSS logical pixels
+ * - `pane_y_css`: main pane top in CSS px (`FDB_PANE_MAIN_Y / DPR`)
+ * - `pane_h_css`: main pane height in CSS px (`FDB_PANE_MAIN_H / DPR`)
+ * - `padded_pmin / padded_pmax`: padded price range from FDB bytes 88/92
+ * @param {number} y_css
+ * @param {number} pane_y_css
+ * @param {number} pane_h_css
+ * @param {number} padded_pmin
+ * @param {number} padded_pmax
+ * @returns {number}
+ */
+export function screen_y_to_price(y_css, pane_y_css, pane_h_css, padded_pmin, padded_pmax) {
+    const ret = wasm.screen_y_to_price(y_css, pane_y_css, pane_h_css, padded_pmin, padded_pmax);
+    return ret;
 }
 
 function __wbg_get_imports() {
