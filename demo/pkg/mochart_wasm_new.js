@@ -491,6 +491,14 @@ export class ExecutionPlan {
         wasm.executionplan_set_bb_params(this.__wbg_ptr, slot_id, std_dev);
     }
     /**
+     * Mark an indicator to be executed after another indicator
+     * @param {number} slot_id
+     * @param {number} depends_on_id
+     */
+    set_dependency(slot_id, depends_on_id) {
+        wasm.executionplan_set_dependency(this.__wbg_ptr, slot_id, depends_on_id);
+    }
+    /**
      * Override MACD-specific parameters.
      *
      * Must be called before `compile()`.
