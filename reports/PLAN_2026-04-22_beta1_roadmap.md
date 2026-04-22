@@ -5,6 +5,51 @@
 
 ---
 
+## 0.1 実装ノート (2026-04-22 監査結果)
+
+ロードマップ策定後に実装・マージされた内容と、当初案との差分を記録する。
+
+| 区分 | 当初計画 | 実装結果 | ステータス |
+| --- | --- | --- | --- |
+| F1 | ディレクトリ命名整理 | 完了 (commit `f7a0f05`) | ✅ |
+| F2 | デッドコード archive 化 | 完了 (commit `47eb9e2`) | ✅ |
+| F3 PR-3a/b/d | TypeDoc + VitePress 雛形・JSDoc・guide 記事 | 完了 (commit `ae7cac4`) | ✅ |
+| F3 PR-3c | `scripts/build-docs.sh` への docs:build 統合 + Pages デプロイ | **未実装** — 別 PR で対応 | ⏸ 保留 |
+| F4 PR-4a | `packages/core/` への移管 (full monorepo) | **方針変更**: 既存 `src/` を保持し `packages/{solid,react,vue}/` のみ追加 | 🔁 仕様変更 |
+| F4 PR-4b/c/d | Solid / React / Vue ラッパー | 完了 (commits `2900f67`, `7033b94`, `bc11552`) | ✅ |
+| F4 PR-4e | `examples/with-{framework}/` 公式サンプル | **未実装** — β1 後の next-up タスクへ送る | ⏸ 保留 |
+| F4 共通 API | `seriesType` prop / `setSeriesType()` を MochartProps に含む | **採用見送り**: `IChartApi` に該当 API がないため、wrapper も `data` + `indicators` に絞った | 🔁 仕様変更 |
+
+### 0.1.1 監査での主要修正 (commit: `fix/beta1-audit-followup`)
+
+ロードマップ通りに実装した結果、後段の監査で以下の不整合が判明し、同ブランチで修正済み:
+
+1. **wrapper 配布不能問題** — `packages/{solid,react,vue}/package.json` が `"private": true` かつ
+   `"@monasche/mochart": "workspace:*"` を宣言していたが、root に `workspaces` フィールドが無く、
+   `bun install` が `Workspace dependency "@monasche/mochart" not found` で失敗していた。
+   - 対応: root に `"workspaces": ["packages/*"]` を追加、各 wrapper の `private` を撤廃、
+     core への参照を `peerDependencies: ">=0.1.0-alpha.0"` のみとし、
+     local typecheck 用に `tsconfig.json#paths` で `../../dist/index.d.ts` を解決。
+2. **docs Getting Started の API 誤案内** — `createMochart` / `seriesType` / `setSeriesType()` を
+   紹介していたが実 API には存在しなかった。実装済みの `createChart(container, { worker })` +
+   `setData()` + `addIndicator()` ベースに書き直し。
+3. **wrapper indicator diff key の欠陥** — `${kind}:${period}` のみで突合していたため、
+   pane / slow / signal / stdDev / style / color / lineWidth / enabled の差分を取り逃がしていた。
+   全 discriminating field を含む key に変更。
+
+### 0.1.2 β1 リリース前に残るタスク
+
+| ID | 内容 | 優先度 |
+| --- | --- | --- |
+| PR-3c | `scripts/build-docs.sh` に docs-site VitePress 出力の同梱を追加し、Pages にデプロイ | 高 |
+| PR-3c-doc | `docs-site/README.md` の URL を「未公開」に修正、または PR-3c 完了まで一時的に削除 | 中 |
+| PR-4e | `examples/with-{solid,react,vue}/` 最小サンプル (各 1 ファイル `App.{tsx,vue}`) | 中 |
+| PR-pre-1 | 既存 `src/webgpu/createWebGpuChart.ts:318` の `WasmRenderer.new` 型エラー解消 | 高 |
+
+これらを残置のまま β1 タグを切らないこと。
+
+---
+
 ## 0. β1 の定義 (Definition of Done)
 
 以下 4 つが揃った時点で **0.1.0-beta.1** を切る:
