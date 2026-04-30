@@ -22,9 +22,9 @@ For everyone else: nothing wrong with picking something battle-tested. Come back
 
 ---
 
-> ⚠️ **Alpha stage — Setup is non-trivial**
+> ⚠️ **Beta 1 — Setup is non-trivial**
 >
-> Mochart is currently in **early alpha**. Integration requires several steps beyond a simple `npm install`:
+> Mochart is currently in **public beta (`0.1.0-beta.1`)**. The render pipeline, public API, and worker protocol are stable enough for evaluation, but production use should still expect rough edges. Integration requires several steps beyond a simple `npm install`:
 >
 > - **WebGPU browser requirement**: Chrome 113+ / Edge 113+ / Safari 18+ (macOS/iOS) required. Firefox does not yet support WebGPU in stable releases.
 > - **Worker instantiation**: The chart's GPU renderer and data engine run inside a Web Worker. You must instantiate and pass the Worker explicitly — the bundler setup differs per tool (Vite, webpack, Rollup, esbuild). See [Worker Setup](#worker-setup) below.
@@ -144,6 +144,77 @@ const chart = createChart(document.getElementById('chart')!, {
 ```
 
 > **`symbol` is optional.** If omitted, no ticker label is shown. Pass any string to display it.
+
+## Series Types
+
+Mochart's main pane can render the OHLCV stream as **candlesticks** (default),
+a **line** chart, or a filled **area** chart. The same data feed drives all
+three views — only the GPU shader path differs.
+
+```ts
+const chart = createChart(el, {
+  data,
+  series: { type: 'candlestick' }, // 'candlestick' | 'line' | 'area'
+});
+
+// Switch at runtime
+chart.setSeriesType('line');
+chart.setSeriesType('area');
+```
+
+> `'bar'` is reserved for Beta 2. Use `'candlestick'` until then.
+
+### Styling
+
+```ts
+createChart(el, {
+  data,
+  series: {
+    type: 'line',
+    lineColor: '#4f46e5',
+    lineWidth: 2,
+  },
+});
+
+createChart(el, {
+  data,
+  series: {
+    type: 'area',
+    areaTopColor:    [0.31, 0.27, 0.90, 0.55],   // RGBA tuple, 0–1
+    areaBottomColor: '#4f46e500',                 // #RRGGBBAA hex
+    lineColor:       '#4f46e5',
+    lineWidth:       1.5,
+  },
+});
+```
+
+Color accepts:
+
+- `#RRGGBB` or `#RRGGBBAA` hex strings.
+- `[r, g, b, a]` tuples with components in `0–1`.
+
+Update styling at runtime:
+
+```ts
+chart.setSeriesStyle({
+  lineColor:       '#22c55e',
+  areaTopColor:    [0.13, 0.77, 0.37, 0.45],
+  areaBottomColor: [0.13, 0.77, 0.37, 0.00],
+  lineWidth:       2,
+});
+```
+
+### Crosshair behaviour per series type
+
+- **Candlestick** — classic vertical/horizontal crosshair plus a four-line
+  `O / H / L / C` popup.
+- **Line / Area** — Apple Stocks-style scrubber: a single vertical guide,
+  a colored dot at the close price, top-left **Close + Date** readout, and a
+  bottom date badge. There is no OHLC popup because line/area charts only
+  expose the close channel.
+
+All three modes share the same hit-test pipeline, so `chart.on('crosshair')`
+emits identical events regardless of the active series type.
 
 ## Data Format
 
