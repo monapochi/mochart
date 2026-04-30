@@ -114,6 +114,36 @@ reactive diff 系のコードで key 関数の仕様が甘いと、
 
 「PR ごとに CI を通す」という原則の前に、「PR 内で自分で通す」がある。
 
+### 後日追補：実機マウント検証の試みと挫折
+
+修正完了後、「型 build までしか確認していない、実機マウント未検証」という指摘を受けて
+bun:test 上で各 wrapper を実マウントする smoke test を試した。
+`mock.module("@monasche/mochart", ...)` で `createChart` をスパイに差し替え、
+happy-dom で DOM を仕立て、`solid-js/web` / `react-dom/client` / `vue` の `createApp` を順に走らせる。
+
+結果は 3 framework 全敗:
+
+- **Solid**: bun が `solid-js/web` の SSR ビルドを引いてしまい
+  `Client-only API called on the server side` で停止。
+  jsx-dev-runtime + babel-plugin-jsx-dom-expressions のセットアップが要る。
+- **React**: createRoot は走るが `useEffect` が happy-dom 上で flush されず、
+  `lastChart` が undefined のまま expect 失敗。`act()` ラッパが要る。
+- **Vue**: `SVGElement is not defined` で停止。happy-dom が当該 global を提供していない。
+
+いずれも本質的な不具合ではなく、bun:test 環境上で各 framework の test adapter
+(`@testing-library/{react,vue}`、Solid babel preset) を整えれば解消する話。
+ただし wrapper 1 ファイル（< 150 LOC）の検証コストとして adapter 3 種を養う ROI は低い。
+
+**判断**: bun:test 上の smoke test は撤回し、PR-4e (examples/with-{framework}/) で
+**Vite 経由の実 dev サーバー + puppeteer による描画スクリーンショット検証** に方針転換する。
+これなら adapter 不要で、ユーザーが実際に踏むコードパスをそのまま検証できる。
+
+副産物として、`tsconfig.json` (test 用、paths なし) と `tsconfig.build.json` (build 用、
+dist dts への paths あり) を分離した。これは bun:test が `paths` を辿って `dist/index.d.ts`
+の `'./api/createChart'` を resolve しようとして失敗する問題への対処であり、
+**「test と build で必要な module resolution が違う」** という当たり前のことを
+今回ようやく実装に落としこんだ。
+
 ロードマップを「未来の設計」から「現状把握 + 残タスク整理」に切り替えた瞬間、
 ドキュメントが生きたものになった。
 
